@@ -121,6 +121,21 @@ func Parser() func(log string) (*LogEntry, error) {
 	}
 }
 
+// LineMatchesKeywords returns true if keywords is empty (no filter) or if line
+// contains any of the keywords (case-insensitive). Used to filter syslog output.
+func LineMatchesKeywords(line string, keywords []string) bool {
+	if len(keywords) == 0 {
+		return true
+	}
+	lineLower := strings.ToLower(line)
+	for _, kw := range keywords {
+		if strings.Contains(lineLower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Close closes the underlying UsbMuxConnection
 func (sysLogConn *Connection) Close() error {
 	return sysLogConn.closer.Close()

@@ -35,7 +35,9 @@ func runDproxyCommand(ctx commandContext) {
 
 func runSyslogCommand(ctx commandContext) {
 	parse, _ := ctx.Args.Bool("--parse")
-	runSyslog(ctx.Device, parse)
+	filterStr, _ := ctx.Args.String("--filter")
+	filterKeywords := parseFilterKeywords(filterStr)
+	runSyslog(ctx.Device, parse, filterKeywords)
 }
 
 func runOSTraceCommand(ctx commandContext) {

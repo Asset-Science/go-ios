@@ -149,7 +149,7 @@ Usage:
   ios get-wallpaper [--output=<outfile>] [options]
   ios get-icon-layout [--output=<outfile>] [options]
   ios set-icon-layout <layoutFile> [options]
-  ios syslog [--parse] [options]
+  ios syslog [--parse] [--filter=<keywords>] [options]
   ios ostrace [--pid=<processID>] [--process=<processName>] [--follow] [--level=<levels>] [--subsystem=<sub>] [--match=<str>] [--exclude=<str>] [options]
   ios sysmontap [options]
   ios timeformat (24h | 12h | toggle | get) [--force] [options]
@@ -194,6 +194,7 @@ Options:
   --pretty                  Pretty-print JSON command output
   -h --help                 Show this screen.
   --udid=<udid>             UDID of the device. Can also be set via GO_IOS_UDID environment variable.
+  --filter=<keywords>       For syslog: comma-separated keywords; only lines containing any keyword (case-insensitive) are shown.
   --tunnel-info-port=<port> When go-ios is used to manage tunnels for iOS 17+,
                             it exposes them on an HTTP-API (default port: 28100)
   --tunnel-info-host=<host> Host the tunnel-info HTTP-API binds to and is queried on.
@@ -501,7 +502,7 @@ The commands work as following:
                                                                     behavior may occur if the given layout does not contain every icon on the device".
                                                                     Missing apps are re-paginated, not hidden.
 
-    ios syslog [--parse] [options]                                  Prints a device's log output, Use --parse to parse the fields from the log
+    ios syslog [--parse] [--filter=<keywords>] [options]              Prints a device's log output, Use --parse to parse the fields from the log. Use --filter=repair,error to show only lines containing any keyword (case-insensitive).
     ios ostrace [--pid=<processID>] [--process=<processName>] [--follow] [--level=<levels>] [--subsystem=<sub>] [--match=<str>] [--exclude=<str>]
                                                                      Stream structured syslog via os_trace_relay. Note: streaming logs
                                                                      places significant CPU load on the device.
@@ -1532,7 +1533,22 @@ func printDeviceInfo(device ios.DeviceEntry) {
 	fmt.Println(convertToJSONString(allValues))
 }
 
-func runSyslog(device ios.DeviceEntry, parse bool) {
+func parseFilterKeywords(filterStr string) []string {
+	if filterStr == "" {
+		return nil
+	}
+	parts := strings.Split(filterStr, ",")
+	var keywords []string
+	for _, p := range parts {
+		kw := strings.TrimSpace(p)
+		if kw != "" {
+			keywords = append(keywords, kw)
+		}
+	}
+	return keywords
+}
+
+func runSyslog(device ios.DeviceEntry, parse bool, filterKeywords []string) {
 	slog.Debug("Run Syslog.")
 
 	syslogConnection, err := syslog.New(device)
@@ -1557,6 +1573,10 @@ func runSyslog(device ios.DeviceEntry, parse bool) {
 			}
 			logMessage = strings.TrimSuffix(logMessage, "\x00")
 			logMessage = strings.TrimSuffix(logMessage, "\x0A")
+
+			if !syslog.LineMatchesKeywords(logMessage, filterKeywords) {
+				continue
+			}
 
 			fmt.Println(logFormatter(logMessage))
 		}

@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/instruments"
@@ -57,6 +58,21 @@ func Notifications(c *gin.Context) {
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
 // @Router       /listen [get]
+func parseFilterKeywords(filterStr string) []string {
+	if filterStr == "" {
+		return nil
+	}
+	parts := strings.Split(filterStr, ",")
+	var keywords []string
+	for _, p := range parts {
+		kw := strings.TrimSpace(p)
+		if kw != "" {
+			keywords = append(keywords, kw)
+		}
+	}
+	return keywords
+}
+
 func Syslog(c *gin.Context) {
 	// We are streaming current time to clients in the interval 10 seconds
 	log.Info("connect")
@@ -66,8 +82,12 @@ func Syslog(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err})
 		return
 	}
+	filterKeywords := parseFilterKeywords(c.Query("filter"))
 	c.Stream(func(w io.Writer) bool {
 		m, _ := syslogConnection.ReadLogMessage()
+		if !syslog.LineMatchesKeywords(m, filterKeywords) {
+			return true
+		}
 		// Stream message to client from message channel
 		w.Write([]byte(MustMarshal(m)))
 		return true
