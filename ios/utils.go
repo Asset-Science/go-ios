@@ -112,6 +112,11 @@ func Ntohs(port uint16) uint16 {
 	return binary.LittleEndian.Uint16(buf)
 }
 
+// MatchUDID reports whether query matches serial (case-insensitive).
+func MatchUDID(serial, query string) bool {
+	return strings.EqualFold(serial, query)
+}
+
 // GetDevice returns:
 // the device for the udid if a valid udid is provided.
 // if the env variable 'udid' is specified, the device with that udid
@@ -144,7 +149,7 @@ func GetDeviceWithAddress(udid string, address string, provider RsdPortProvider)
 		return device, nil
 	}
 	for _, device := range deviceList.DeviceList {
-		if device.Properties.SerialNumber == udid {
+		if MatchUDID(device.Properties.SerialNumber, udid) {
 			device.Address = address
 			device.Rsd = provider
 			return device, nil
