@@ -568,7 +568,7 @@ func (m *TunnelManager) FindTunnel(udid string) (Tunnel, error) {
 	}
 
 	for _, t := range tunnels {
-		if t.Udid == udid {
+		if ios.MatchUDID(t.Udid, udid) {
 			return t, nil
 		}
 	}
