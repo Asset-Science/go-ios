@@ -1,13 +1,15 @@
 package api
 
 import (
+	"io"
+	"net/http"
+	"strings"
+
 	"github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/instruments"
 	"github.com/danielpaulus/go-ios/ios/syslog"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
-	"io"
-	"net/http"
 )
 
 // Notifications uses instruments to get application state change events. It will stream the events as json objects separated by line breaks until it errors out.
@@ -54,8 +56,22 @@ func Notifications(c *gin.Context) {
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
 // @Router       /listen [get]
+func parseFilterKeywords(filterStr string) []string {
+	if filterStr == "" {
+		return nil
+	}
+	parts := strings.Split(filterStr, ",")
+	var keywords []string
+	for _, p := range parts {
+		kw := strings.TrimSpace(p)
+		if kw != "" {
+			keywords = append(keywords, kw)
+		}
+	}
+	return keywords
+}
+
 func Syslog(c *gin.Context) {
-	// We are streaming current time to clients in the interval 10 seconds
 	log.Info("connect")
 	device := c.MustGet(IOS_KEY).(ios.DeviceEntry)
 	syslogConnection, err := syslog.New(device)
@@ -63,9 +79,12 @@ func Syslog(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err})
 		return
 	}
+	filterKeywords := parseFilterKeywords(c.Query("filter"))
 	c.Stream(func(w io.Writer) bool {
 		m, _ := syslogConnection.ReadLogMessage()
-		// Stream message to client from message channel
+		if !syslog.LineMatchesKeywords(m, filterKeywords) {
+			return true
+		}
 		w.Write([]byte(MustMarshal(m)))
 		return true
 	})

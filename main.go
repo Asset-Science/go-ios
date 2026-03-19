@@ -140,7 +140,7 @@ Usage:
   ios screenshot [options] [--output=<outfile>] [--stream] [--port=<port>]
   ios setlocation [options] [--lat=<lat>] [--lon=<lon>]
   ios setlocationgpx [options] [--gpxfilepath=<gpxfilepath>]
-  ios syslog [--parse] [options]
+  ios syslog [--parse] [--filter=<keywords>] [options]
   ios sysmontap [options]
   ios timeformat (24h | 12h | toggle | get) [--force] [options]
   ios tunnel ls [options]
@@ -165,6 +165,7 @@ Options:
                             connect a device and open Xcode
   --rsd-port=<port>         Port of remote service discovery on the device through the tunnel
                             This parameter is similar to '--address' and can be obtained by the same log filter
+  --filter=<keywords>       For syslog: comma-separated keywords; only lines containing any keyword (case-insensitive) are shown.
   --proxyurl=<url>          Set this if you want go-ios to use a http proxy for outgoing requests,
                             like for downloading images or contacting Apple during device activation.
                             A simple format like: "http://PROXY_LOGIN:PROXY_PASS@proxyIp:proxyPort" works.
@@ -372,7 +373,7 @@ The commands work as following:
     ios setlocationgpx [options] [--gpxfilepath=<gpxfilepath>]      Updates the location of the device based on the data in a GPX file.
                                                                     Ex.: setlocationgpx --gpxfilepath=/home/username/location.gpx
 
-    ios syslog [--parse] [options]                                  Prints a device's log output, Use --parse to parse the fields from the log
+    ios syslog [--parse] [--filter=<keywords>] [options]              Prints a device's log output, Use --parse to parse the fields from the log. Use --filter=repair,error to show only lines containing any keyword (case-insensitive).
     ios sysmontap                                                   Get system stats like MEM, CPU
 
     ios timeformat (24h | 12h | toggle | get) [--force] [options]   Sets, or returns the state of the "time format".
@@ -833,8 +834,10 @@ The commands work as following:
 	b, _ = arguments.Bool("syslog")
 	if b {
 		parse, _ := arguments.Bool("--parse")
+		filterStr, _ := arguments.String("--filter")
+		filterKeywords := parseFilterKeywords(filterStr)
 
-		runSyslog(device, parse)
+		runSyslog(device, parse, filterKeywords)
 		return
 	}
 
@@ -2685,7 +2688,22 @@ func printDeviceInfo(device ios.DeviceEntry) {
 	fmt.Println(convertToJSONString(allValues))
 }
 
-func runSyslog(device ios.DeviceEntry, parse bool) {
+func parseFilterKeywords(filterStr string) []string {
+	if filterStr == "" {
+		return nil
+	}
+	parts := strings.Split(filterStr, ",")
+	var keywords []string
+	for _, p := range parts {
+		kw := strings.TrimSpace(p)
+		if kw != "" {
+			keywords = append(keywords, kw)
+		}
+	}
+	return keywords
+}
+
+func runSyslog(device ios.DeviceEntry, parse bool, filterKeywords []string) {
 	log.Debug("Run Syslog.")
 
 	syslogConnection, err := syslog.New(device)
@@ -2711,6 +2729,9 @@ func runSyslog(device ios.DeviceEntry, parse bool) {
 			logMessage = strings.TrimSuffix(logMessage, "\x00")
 			logMessage = strings.TrimSuffix(logMessage, "\x0A")
 
+			if !syslog.LineMatchesKeywords(logMessage, filterKeywords) {
+				continue
+			}
 			fmt.Println(logFormatter(logMessage))
 		}
 	}()
