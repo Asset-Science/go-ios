@@ -41,6 +41,7 @@ type ProfileInfo struct {
 }
 
 type ProfileMetadata struct {
+	PayloadOrganization      string
 	PayloadDescription       string
 	PayloadDisplayName       string
 	PayloadRemovalDisallowed bool
@@ -144,6 +145,10 @@ func parseProfile(idString string, dict map[string]interface{}) (ProfileInfo, er
 	result.Metadata.PayloadDisplayName, ok = metadata["PayloadDisplayName"].(string)
 	if !ok {
 		return result, fmt.Errorf("keyError PayloadDisplayName %+v", dict)
+	}
+	result.Metadata.PayloadOrganization, ok = metadata["PayloadOrganization"].(string)
+	if !ok {
+		result.Metadata.PayloadOrganization = ""
 	}
 	result.Metadata.PayloadRemovalDisallowed, ok = metadata["PayloadRemovalDisallowed"].(bool)
 	if !ok {
