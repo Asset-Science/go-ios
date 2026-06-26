@@ -208,6 +208,24 @@ func Pair(device DeviceEntry) error {
 	return nil
 }
 
+// IsPaired reports whether the device is currently paired with AND trusted by
+// this host. This is the go-ios equivalent of Apple Configurator's
+// `cfgutil get isPaired`: a saved pair record alone is not sufficient — the
+// device must also currently trust the host (the user has tapped "Trust" and
+// the record has not been invalidated by a reset/restore). That is only proven
+// by successfully starting a lockdown session with the saved pair record, which
+// is exactly what ConnectLockdownWithSession does. Any failure (no pair record,
+// StartSession rejected, transient usbmux issue) is reported as not-paired with
+// no error, matching cfgutil's boolean yes/no answer.
+func IsPaired(device DeviceEntry) (bool, error) {
+	conn, err := ConnectLockdownWithSession(device)
+	if err != nil {
+		return false, nil
+	}
+	conn.Close()
+	return true, nil
+}
+
 type FullPairRecordData struct {
 	DeviceCertificate []byte
 	HostCertificate   []byte

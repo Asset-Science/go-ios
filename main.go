@@ -120,6 +120,7 @@ Usage:
   ios memlimitoff (--process=<processName>) [options]
   ios mobilegestalt <key>... [--plist] [options]
   ios pair [--p12file=<orgid>] [--password=<p12password>] [options]
+  ios pair --check [options]
   ios pcap [options] [--pid=<processID>] [--process=<processName>]
   ios prepare [--skip-all] [--skip=<option>]... [--certfile=<cert_file_path>] [--orgname=<org_name>] [--p12password=<p12password>] [--locale=<locale>] [--lang=<lang>] [options]
   ios prepare cloudconfig [options]
@@ -362,6 +363,9 @@ The commands work as following:
     ios pair [--p12file=<orgid>] [--password=<p12password>] [options]  Pairs the device. If the device is supervised, specify the path to the p12 file
                                                                        to pair without a trust dialog. Specify the password either with the argument or
                                                                        by setting the environment variable 'P12_PASSWORD'
+    ios pair --check [options]                                         Reports whether the device is currently paired with AND trusts this host
+                                                                       (lockdown session can be established). Prints {"Paired": true|false}.
+                                                                       go-ios equivalent of 'cfgutil get isPaired'.
 
     ios pcap [options] [--pid=<processID>] [--process=<processName>]   Starts a pcap dump of network traffic, use --pid or --process to filter specific processes.
 

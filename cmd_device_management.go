@@ -212,6 +212,13 @@ func runDeviceNameCommand(ctx commandContext) {
 }
 
 func runPairCommand(ctx commandContext) {
+	check, _ := ctx.Args.Bool("--check")
+	if check {
+		paired, err := ios.IsPaired(ctx.Device)
+		exitIfError("failed checking pair state", err)
+		fmt.Println(convertToJSONString(map[string]interface{}{"Paired": paired}))
+		return
+	}
 	org, _ := ctx.Args.String("--p12file")
 	pwd, _ := ctx.Args.String("--password")
 	if pwd == "" {
