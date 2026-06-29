@@ -116,6 +116,7 @@ Usage:
   ios launch <bundleID> [--wait] [--kill-existing] [--arg=<a>]... [--env=<e>]... [options]
   ios list [options] [--details]
   ios listen [options]
+  ios server [--address=<address>] [options]
   ios lockdown get [<key>] [--domain=<domain>] [options]
   ios memlimitoff (--process=<processName>) [options]
   ios mobilegestalt <key>... [--plist] [options]
@@ -349,6 +350,13 @@ The commands work as following:
                                                                        If --details is specified, it includes version, name and model of each device.
 
     ios listen [options]                                               Keeps a persistent connection open and notifies about newly connected or disconnected devices.
+
+    ios server [--address=<address>] [options]                         Runs a single long-lived REST daemon exposing device operations
+                                                                       (list/info/pair --check/apps/profiles/batterycheck/install/uninstall/
+                                                                       reboot/activate/erase/prepare) over HTTP for the PDD app to call
+                                                                       instead of spawning a subprocess per command. Default bind
+                                                                       127.0.0.1:8080; override with --address=<host:port>. Select the
+                                                                       target device per-request with a ?udid=<udid> query parameter.
 
     ios lockdown get [<key>] [--domain=<domain>] [options]             Query lockdown values. Without arguments returns all values. Specify a key to get a specific value.
                                                                        Use --domain to query from a specific domain (e.g., com.apple.disk_usage, com.apple.PurpleBuddy).

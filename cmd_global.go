@@ -25,6 +25,7 @@ var globalCommands = []command{
 		run: runUICommand,
 	},
 	commandByBool("listen", runListenCommand),
+	commandByBool("server", runServerCommand),
 	{
 		name:  "list",
 		match: isDeviceListCommand,
@@ -43,6 +44,14 @@ var globalCommands = []command{
 
 func runListenCommand(ctx commandContext) {
 	startListening()
+}
+
+// runServerCommand runs the single long-lived REST daemon (see server.go). It is
+// a global command (dispatched before device resolution) because it manages all
+// attached devices, selected per-request by ?udid=<udid>.
+func runServerCommand(ctx commandContext) {
+	address, _ := ctx.Args.String("--address")
+	runServer(address)
 }
 
 // isDeviceListCommand matches the bare global `ios list`. globalCommands are
