@@ -29,9 +29,24 @@ import (
 )
 
 // runServer starts the REST daemon and blocks until the process is killed.
-func runServer(address string) {
+// When parentPid > 0, a watchdog exits the process as soon as that parent
+// process is gone, so the server never outlives the app that launched it
+// (covers crash/kill, not just a clean shutdown request).
+func runServer(address string, parentPid int) {
 	if address == "" {
 		address = "127.0.0.1:8080"
+	}
+
+	if parentPid > 0 {
+		go func() {
+			for {
+				time.Sleep(2 * time.Second)
+				if !processAlive(parentPid) {
+					log.WithField("parentPid", parentPid).Info("parent process gone; shutting down go-ios server")
+					os.Exit(0)
+				}
+			}
+		}()
 	}
 
 	mux := http.NewServeMux()

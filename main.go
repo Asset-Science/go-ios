@@ -116,7 +116,7 @@ Usage:
   ios launch <bundleID> [--wait] [--kill-existing] [--arg=<a>]... [--env=<e>]... [options]
   ios list [options] [--details]
   ios listen [options]
-  ios server [--address=<address>] [options]
+  ios server [--address=<address>] [--parent-pid=<pid>] [options]
   ios lockdown get [<key>] [--domain=<domain>] [options]
   ios memlimitoff (--process=<processName>) [options]
   ios mobilegestalt <key>... [--plist] [options]

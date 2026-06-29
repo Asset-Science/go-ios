@@ -51,7 +51,11 @@ func runListenCommand(ctx commandContext) {
 // attached devices, selected per-request by ?udid=<udid>.
 func runServerCommand(ctx commandContext) {
 	address, _ := ctx.Args.String("--address")
-	runServer(address)
+	// --parent-pid ties the server's lifetime to the app: when that process
+	// exits (even on crash/kill), the server exits too, so it never outlives
+	// the app. 0/absent disables the watchdog.
+	parentPid, _ := ctx.Args.Int("--parent-pid")
+	runServer(address, parentPid)
 }
 
 // isDeviceListCommand matches the bare global `ios list`. globalCommands are
