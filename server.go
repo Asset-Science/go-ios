@@ -183,7 +183,18 @@ func runServer(address string) {
 	// implicit in the skip list; pass certfile (DER or p12) + orgname to supervise.
 	mux.HandleFunc("/prepare", postDeviceHandler(func(w http.ResponseWriter, r *http.Request, d ios.DeviceEntry) {
 		q := r.URL.Query()
+		// chooseLocation=true shows the Location pane (skip everything else);
+		// otherwise skip every setup pane. Mirrors the PDD cfgutil behavior.
 		skip := mcinstall.GetAllSetupSkipOptions()
+		if q.Get("chooseLocation") == "true" {
+			filtered := skip[:0:0]
+			for _, k := range skip {
+				if k != "Location" {
+					filtered = append(filtered, k)
+				}
+			}
+			skip = filtered
+		}
 		var certBytes []byte
 		certfile := q.Get("certfile")
 		orgname := q.Get("orgname")
