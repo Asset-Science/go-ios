@@ -36,10 +36,20 @@ func WithTimeout(seconds uint32) ChannelOption {
 	}
 }
 
+// registeredMethodBuffer bounds how many not-yet-consumed remote method calls
+// are kept per selector. Dispatch runs on the connection's single reader
+// goroutine and must never block: without a buffer, one event arriving while
+// no ReceiveMethodCall is pending would stall delivery for every channel on
+// the connection (head-of-line blocking with a silent hang).
+const registeredMethodBuffer = 16
+
 func (d *Channel) RegisterMethodForRemote(selector string) {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
-	d.registeredMethods[selector] = make(chan Message)
+	if d.registeredMethods == nil {
+		d.registeredMethods = map[string]chan Message{}
+	}
+	d.registeredMethods[selector] = make(chan Message, registeredMethodBuffer)
 }
 
 func (d *Channel) ReceiveMethodCall(selector string) Message {
@@ -104,7 +114,11 @@ func (d *Channel) methodCallWithReply(ctx context.Context, selector string, auxi
 		return msg, err
 	}
 	if msg.HasError() {
-		return msg, fmt.Errorf("failed invoking method '%s' with error: %s", selector, msg.Payload[0])
+		var errPayload interface{}
+		if len(msg.Payload) > 0 {
+			errPayload = msg.Payload[0]
+		}
+		return msg, fmt.Errorf("failed invoking method '%s' with error: %v", selector, errPayload)
 	}
 	return msg, nil
 }
@@ -152,18 +166,52 @@ func (d *Channel) sendAndAwaitReply(ctx context.Context, expectsReply bool, mess
 	if err != nil {
 		return Message{}, err
 	}
-	responseChannel := make(chan Message)
+	// Buffered so a reply racing with our timeout can always be deposited by
+	// sendResponse instead of being dropped on the non-blocking send.
+	responseChannel := make(chan Message, 1)
 	d.AddResponseWaiter(identifier, responseChannel)
 
 	err = d.connection.Send(bytes)
 	if err != nil {
+		d.removeResponseWaiter(identifier)
 		return Message{}, err
 	}
 	select {
 	case response := <-responseChannel:
 		return response, nil
 	case <-ctx.Done():
+		// Deregister so the abandoned waiter does not leak in responseWaiters
+		// (and a stale defragmenter for this identifier is cleaned up too).
+		d.removeResponseWaiter(identifier)
 		return Message{}, fmt.Errorf("Timed out waiting for response for message:%d channel:%d", identifier, d.channelCode)
+	}
+}
+
+func (d *Channel) removeResponseWaiter(identifier int) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	delete(d.responseWaiters, identifier)
+	delete(d.defragmenters, identifier)
+}
+
+// deliverEvent hands a device-initiated method call to the selector's queue
+// without ever blocking the reader goroutine. The queue is LOSSY BY DESIGN:
+// when it is full the OLDEST event is dropped (with a warning) so the most
+// recent state survives. This is the right trade-off for the current
+// latest-state consumers (e.g. the AX inspector's cursor position); do not
+// route a selector through here if every single callback matters.
+func (d *Channel) deliverEvent(queue chan Message, msg Message, selector string) {
+	for {
+		select {
+		case queue <- msg:
+			return
+		default:
+		}
+		select {
+		case dropped := <-queue:
+			golog.Warn("event queue full, dropping oldest event", "module", logModule, "channel_id", d.channelName, "selector", selector, "dropped_identifier", dropped.Identifier)
+		default:
+		}
 	}
 }
 
@@ -173,10 +221,17 @@ func (d *Channel) Dispatch(msg Message) {
 		d.messageIdentifier = msg.Identifier + 1
 	}
 	if msg.PayloadHeader.MessageType == Methodinvocation {
-		golog.Trace("dispatching", "module", logModule, "channel_id", d.channelName, "selector", msg.Payload[0].(string))
-		if v, ok := d.registeredMethods[msg.Payload[0].(string)]; ok {
+		var selector string
+		if len(msg.Payload) > 0 {
+			selector, _ = msg.Payload[0].(string)
+		}
+		golog.Trace("dispatching", "module", logModule, "channel_id", d.channelName, "selector", selector)
+		if v, ok := d.registeredMethods[selector]; ok {
 			d.mutex.Unlock()
-			v <- msg
+			// Never block the reader goroutine: an event arriving while no
+			// ReceiveMethodCall is pending would otherwise stall delivery for
+			// every channel on this connection.
+			d.deliverEvent(v, msg, selector)
 			return
 		}
 	}
@@ -203,7 +258,7 @@ func (d *Channel) Dispatch(msg Message) {
 					}
 
 					if msg.ConversationIndex > 0 {
-						d.responseWaiters[msg.Identifier] <- msg
+						sendResponse(d.responseWaiters[msg.Identifier], msg)
 					} else {
 						d.messageDispatcher.Dispatch(msg)
 					}
@@ -218,10 +273,24 @@ func (d *Channel) Dispatch(msg Message) {
 			return
 		}
 
-		d.responseWaiters[msg.Identifier] <- msg
+		sendResponse(d.responseWaiters[msg.Identifier], msg)
 		delete(d.responseWaiters, msg.Identifier)
 		delete(d.defragmenters, msg.Identifier)
 		return
 	}
 	d.messageDispatcher.Dispatch(msg)
+}
+
+// sendResponse delivers msg to a response waiter without ever blocking the
+// reader goroutine. A malformed/unexpected Identifier may map to no waiter (a
+// nil channel, which would block forever) or to a waiter that has already given
+// up, so we guard for nil and use a non-blocking send.
+func sendResponse(waiter chan Message, msg Message) {
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter <- msg:
+	default:
+	}
 }

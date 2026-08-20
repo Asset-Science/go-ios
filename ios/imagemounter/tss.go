@@ -2,7 +2,6 @@ package imagemounter
 
 import (
 	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +47,16 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
 		"UID_MODE":          false,
 	}
 
+	// Personalization parameters describing this device to the manifest's
+	// RestoreRequestRules. Developer disk images are always personalized for a
+	// production, secure, img4-based device.
+	tssParameters := map[string]interface{}{
+		"ApProductionMode": true,
+		"ApSecurityMode":   true,
+		"ApSupportsImg4":   true,
+	}
+	rules := identity.restoreRequestRules()
+
 	for key, entry := range identity.Manifest {
 		if !entry.Trusted {
 			continue
@@ -55,9 +64,20 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
 		entryParams := map[string]interface{}{
 			"Digest":  entry.Digest,
 			"Trusted": true,
-			"EPRO":    entry.EPRO,
-			"ESEC":    entry.ESEC,
 		}
+		// Keep any literal EPRO/ESEC the manifest provides, then let its
+		// RestoreRequestRules override them for this device. Modern DDI manifests
+		// omit the literals entirely; without applying the rules the request goes
+		// out with EPRO/ESEC=false and Apple TSS rejects it with status 94
+		// ("This device isn't eligible for the requested build.").
+		if entry.EPRO != nil {
+			entryParams["EPRO"] = *entry.EPRO
+		}
+		if entry.ESEC != nil {
+			entryParams["ESEC"] = *entry.ESEC
+		}
+		applyRestoreRequestRules(entryParams, tssParameters, rules)
+
 		if key == "PersonalizedDMG" || key == "PersonalizedDmg" {
 			if entry.Name != "" {
 				entryParams["Name"] = entry.Name
@@ -79,20 +99,13 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
 		return nil, fmt.Errorf("getSignature: failed to encode request body: %w", err)
 	}
 
-	h := http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-			Proxy: t.h.Transport.(*http.Transport).Proxy,
-		},
-		Timeout: 1 * time.Minute,
-	}
 	req, err := http.NewRequest("POST", "https://gs.apple.com/TSS/controller?action=2", buf)
 	if err != nil {
 		return nil, err
 	}
-	res, err := h.Do(req)
+	// Reuse the properly-verifying client built in newTssClient. gs.apple.com
+	// serves a valid public certificate, so TLS verification stays enabled.
+	res, err := t.h.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("getSignature: failed to send request: %w", err)
 	}
@@ -103,7 +116,7 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
 			return nil, fmt.Errorf("getSignature: failed to parse response: %w", err)
 		}
 		if resp.status != 0 {
-			return nil, fmt.Errorf("unexpected status in response %d", resp.status)
+			return nil, fmt.Errorf("unexpected status in response %d: %q", resp.status, resp.message)
 		}
 		var ticket map[string]interface{}
 		_, err = plist.Unmarshal([]byte(resp.requestString), &ticket)

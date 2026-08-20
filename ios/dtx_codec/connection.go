@@ -112,12 +112,24 @@ func (dtxConn *Connection) Dispatch(msg Message) {
 // Dispatch prints log messages and errors when they are received and also creates local Channels when requested by the device.
 func (g GlobalDispatcher) Dispatch(msg Message) {
 	SendAckIfNeeded(g.dtxConnection, msg)
-	if msg.Payload != nil {
-		if requestChannel == msg.Payload[0] {
+	if len(msg.Payload) > 0 {
+		selector, _ := msg.Payload[0].(string)
+		if requestChannel == selector {
 			g.requestChannelMessages <- msg
 		}
-		// TODO: use the dispatchFunctions map
-		if "outputReceived:fromProcess:atTime:" == msg.Payload[0] {
+		if fn, ok := g.dispatchFunctions[selector]; ok {
+			// e.g. _notifyOfPublishedCapabilities:, which every instruments
+			// connection receives once as its first message. Handling it here
+			// keeps it from falling through to the MessageDispatcher forwarding
+			// below, which would otherwise spam "no connection dispatcher
+			// registered" on connections that never register one, or — worse —
+			// deadlock the reader loop if a registered dispatcher forwards to an
+			// unbuffered channel nobody is draining yet (as instruments'
+			// ListenAppStateNotifications does before its first Receive() call).
+			fn(msg)
+			return
+		}
+		if "outputReceived:fromProcess:atTime:" == selector {
 			args := msg.Auxiliary.GetArguments()
 			if len(args) < 3 {
 				golog.Warn("outputReceived:fromProcess:atTime: expected at least 3 arguments", "module", logModule, "count", len(args))
@@ -137,9 +149,20 @@ func (g GlobalDispatcher) Dispatch(msg Message) {
 	}
 	golog.Trace("Global Dispatcher Received", "module", logModule, "payload", msg.Payload, "auxiliary", msg.Auxiliary)
 	if msg.HasError() {
-		golog.Error("global dispatcher received error", "module", logModule, "error", msg.Payload[0])
+		var errPayload interface{}
+		if len(msg.Payload) > 0 {
+			errPayload = msg.Payload[0]
+		}
+		golog.Error("global dispatcher received error", "module", logModule, "error", errPayload)
 	}
-	if msg.PayloadHeader.MessageType == UnknownTypeOne || msg.PayloadHeader.MessageType == ResponseWithReturnValueInPayload {
+	// Methodinvocation covers unsolicited pushes the device sends on the global
+	// channel outside of any request/response exchange (e.g. instruments'
+	// applicationStateNotification:/memoryLevelNotification: once a caller has
+	// opted in via setApplicationStateNotificationsEnabled:) — without it, those
+	// pushes are only trace-logged above and then silently dropped, so a
+	// connection-level MessageDispatcher registered for this purpose never sees
+	// them.
+	if msg.PayloadHeader.MessageType == UnknownTypeOne || msg.PayloadHeader.MessageType == ResponseWithReturnValueInPayload || msg.PayloadHeader.MessageType == Methodinvocation {
 		g.dtxConnection.Dispatch(msg)
 	}
 }

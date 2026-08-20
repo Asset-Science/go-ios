@@ -26,7 +26,8 @@ func Notifications(c *gin.Context) {
 	device := c.MustGet(IOS_KEY).(ios.DeviceEntry)
 	listenerFunc, closeFunc, err := instruments.ListenAppStateNotifications(device)
 	if err != nil {
-		log.Fatal(err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	c.Stream(func(w io.Writer) bool {
 
@@ -82,9 +83,16 @@ func Syslog(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err})
 		return
 	}
+	defer syslogConnection.Close()
 	filterKeywords := parseFilterKeywords(c.Query("filter"))
 	c.Stream(func(w io.Writer) bool {
-		m, _ := syslogConnection.ReadLogMessage()
+		m, err := syslogConnection.ReadLogMessage()
+		// Upstream: a read error means the connection is gone — stop streaming
+		// rather than spinning. Checked before the keyword filter so a dead
+		// connection can never be mistaken for a non-matching line.
+		if err != nil {
+			return false
+		}
 		if !syslog.LineMatchesKeywords(m, filterKeywords) {
 			return true
 		}
@@ -153,9 +161,17 @@ func OsTrace(c *gin.Context) {
 func Listen(c *gin.Context) {
 	// We are streaming current time to clients in the interval 10 seconds
 	log.Info("connect")
-	a, _, _ := ios.Listen()
+	a, closeFunc, err := ios.Listen()
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer closeFunc()
 	c.Stream(func(w io.Writer) bool {
-		l, _ := a()
+		l, err := a()
+		if err != nil {
+			return false
+		}
 		// Stream message to client from message channel
 		w.Write([]byte(MustMarshal(l)))
 		return true

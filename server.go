@@ -231,7 +231,16 @@ func newServeMux() *http.ServeMux {
 				return
 			}
 		}
-		if err := mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang")); err != nil {
+		// timezone was added to mcinstall.Prepare upstream (matching `ios prepare
+		// --timezone=<tz>`); forwarded from the query string like locale/lang.
+		//
+		// NOTE: an empty value is NOT a no-op — Prepare falls back to
+		// ios.SystemTimezone(), i.e. the HOST's timezone, and writes it to the
+		// device during setup-assistant. Before this upstream change /prepare wrote
+		// no timezone at all, so callers that omit the param now get the station's
+		// timezone pushed to the device. Pass an explicit IANA name (e.g.
+		// "America/Chicago") when the device's timezone matters.
+		if err := mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"), q.Get("timezone")); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
