@@ -49,6 +49,21 @@ func runServer(address string, parentPid int) {
 		}()
 	}
 
+	srv := &http.Server{
+		Addr:              address,
+		Handler:           newServeMux(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
+	if err := srv.ListenAndServe(); err != nil {
+		log.WithError(err).Fatal("go-ios server failed")
+	}
+}
+
+// newServeMux wires every REST route. It is separated from runServer so the
+// routing (method checks, JSON shape, device-independent endpoints like
+// /health) is exercisable from tests without binding a socket.
+func newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// --- liveness ---
@@ -200,16 +215,7 @@ func runServer(address string, parentPid int) {
 		q := r.URL.Query()
 		// chooseLocation=true shows the Location pane (skip everything else);
 		// otherwise skip every setup pane. Mirrors the PDD cfgutil behavior.
-		skip := mcinstall.GetAllSetupSkipOptions()
-		if q.Get("chooseLocation") == "true" {
-			filtered := skip[:0:0]
-			for _, k := range skip {
-				if k != "Location" {
-					filtered = append(filtered, k)
-				}
-			}
-			skip = filtered
-		}
+		skip := prepareSkipOptions(q.Get("chooseLocation") == "true")
 		var certBytes []byte
 		certfile := q.Get("certfile")
 		orgname := q.Get("orgname")
@@ -232,15 +238,7 @@ func runServer(address string, parentPid int) {
 		writeOK(w)
 	}))
 
-	srv := &http.Server{
-		Addr:              address,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
-	if err := srv.ListenAndServe(); err != nil {
-		log.WithError(err).Fatal("go-ios server failed")
-	}
+	return mux
 }
 
 // deviceHandler resolves the device from the `udid` query param (empty => the
@@ -270,6 +268,24 @@ func postDeviceHandler(fn func(http.ResponseWriter, *http.Request, ios.DeviceEnt
 		}
 		fn(w, r, device)
 	}
+}
+
+// prepareSkipOptions returns the setup panes to skip during `/prepare`. When
+// chooseLocation is true the Location pane is left in (shown to the user) and
+// everything else is skipped; otherwise every pane is skipped. Mirrors the PDD
+// cfgutil behavior. Kept as a pure function so the filtering is unit-testable.
+func prepareSkipOptions(chooseLocation bool) []string {
+	skip := mcinstall.GetAllSetupSkipOptions()
+	if !chooseLocation {
+		return skip
+	}
+	filtered := skip[:0:0]
+	for _, k := range skip {
+		if k != "Location" {
+			filtered = append(filtered, k)
+		}
+	}
+	return filtered
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
