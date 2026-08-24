@@ -14,6 +14,7 @@ package main
 // success returns the payload, failure returns {"error": "..."} with HTTP 4xx/5xx.
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -51,7 +52,7 @@ func runServer(address string, parentPid int) {
 
 	srv := &http.Server{
 		Addr:              address,
-		Handler:           newServeMux(),
+		Handler:           authMiddleware(newServeMux()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
@@ -248,6 +249,44 @@ func newServeMux() *http.ServeMux {
 	}))
 
 	return mux
+}
+
+// authMiddleware hardens the loopback REST API against local abuse (DESK-3119
+// review item 2 — the endpoints below include destructive ops: /erase, /reboot,
+// /install, /activate, /prepare). It enforces two controls whenever the launcher
+// sets GO_IOS_AUTH_TOKEN (the PDD app always does; a bare manual `ios server`
+// leaves it unset, so auth is disabled for dev convenience):
+//
+//  1. Shared secret: the per-launch token must be presented in X-Go-Ios-Auth, so
+//     only the process that launched the server (and knows the token) can drive
+//     it — not some other local process that merely knows the fixed port.
+//  2. Anti-CSRF: any request carrying an Origin header is rejected. Our own client
+//     never sets one; a browser ALWAYS sets Origin on a cross-origin POST, so this
+//     blocks a drive-by web page from firing a "simple" POST at 127.0.0.1 to erase
+//     an attached device.
+//
+// /health is exempt (liveness only, touches no device) so the launcher can poll it
+// to detect readiness.
+func authMiddleware(next http.Handler) http.Handler {
+	token := os.Getenv("GO_IOS_AUTH_TOKEN")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get("Origin") != "" {
+			writeErr(w, http.StatusForbidden, errBadRequest("cross-origin requests are not allowed"))
+			return
+		}
+		if token != "" {
+			got := r.Header.Get("X-Go-Ios-Auth")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+				writeErr(w, http.StatusUnauthorized, errBadRequest("missing or invalid auth token"))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // deviceHandler resolves the device from the `udid` query param (empty => the
