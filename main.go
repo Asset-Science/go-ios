@@ -663,6 +663,17 @@ func Main() {
 		return
 	}
 
+	// DESK-3471: a plain erase resolves its own device, under its pre-send deadline.
+	if usesBoundedEraseCLI(arguments) {
+		udid, _ := arguments.String("--udid")
+		if udid == "" {
+			udid = os.Getenv("GO_IOS_UDID")
+		}
+		force, _ := arguments.Bool("--force")
+		runBoundedEraseCLI(udid, force)
+		return
+	}
+
 	tunnelInfo := tunnelInfoConfigFromArgs(arguments)
 	device := resolveDevice(arguments, tunnelInfo)
 

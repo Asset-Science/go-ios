@@ -174,3 +174,86 @@ func TestEraseRejectsNonPost(t *testing.T) {
 		t.Fatalf("status=%d, want 405", rec.Code)
 	}
 }
+
+// withEraseCLISeams captures `ios erase` stdout and its exit code instead of exiting.
+func withEraseCLISeams(t *testing.T) (out *string, exitCode *int) {
+	t.Helper()
+	var o string
+	code := -1
+	oldExit, oldStdout := eraseCLIExit, eraseCLIStdout
+	eraseCLIExit = func(c int) { code = c }
+	eraseCLIStdout = func(s string) { o += s }
+	t.Cleanup(func() { eraseCLIExit, eraseCLIStdout = oldExit, oldStdout })
+	return &o, &code
+}
+
+// PDD falls back to the CLI when its server is not up, so the CLI must report the same
+// "nothing was sent" verdict, for either stage, instead of hanging until PDD kills it.
+func TestEraseCLIHangIsReportedAsNotSent(t *testing.T) {
+	for _, stage := range []string{stageResolveDevice, stageOpenService} {
+		t.Run(stage, func(t *testing.T) {
+			release := make(chan struct{})
+			defer close(release)
+			resolve := okResolve
+			open := func(ios.DeviceEntry) (eraseServiceConn, error) { <-release; return &fakeServiceConn{}, nil }
+			if stage == stageResolveDevice {
+				resolve = func(string) (ios.DeviceEntry, error) { <-release; return ios.DeviceEntry{}, nil }
+			}
+			sent := int32(0)
+			withEraseSeams(t, 50*time.Millisecond, resolve, open,
+				func(eraseServiceConn, ios.DeviceEntry) error { atomic.AddInt32(&sent, 1); return nil })
+			out, code := withEraseCLISeams(t)
+
+			runBoundedEraseCLI("cli-hang-"+stage, true)
+
+			if *code != eraseNotSentExitCode {
+				t.Fatalf("exit=%d, want %d", *code, eraseNotSentExitCode)
+			}
+			var body map[string]interface{}
+			if err := json.Unmarshal([]byte(*out), &body); err != nil {
+				t.Fatalf("stdout is not JSON: %v (%q)", err, *out)
+			}
+			if body["notSent"] != true || body["stage"] != stage {
+				t.Fatalf("body=%v, want notSent=true stage=%s", body, stage)
+			}
+			if atomic.LoadInt32(&sent) != 0 {
+				t.Fatal("erase was sent after the pre-send deadline")
+			}
+		})
+	}
+}
+
+func TestEraseCLIHappyPathSendsAndPrintsOk(t *testing.T) {
+	conn := &fakeServiceConn{}
+	withEraseSeams(t, time.Second, okResolve,
+		func(ios.DeviceEntry) (eraseServiceConn, error) { return conn, nil },
+		func(eraseServiceConn, ios.DeviceEntry) error { return nil })
+	out, code := withEraseCLISeams(t)
+
+	runBoundedEraseCLI("cli-happy", true)
+
+	if *code != -1 || *out != `"ok"` {
+		t.Fatalf("exit=%d out=%q, want no exit and \"ok\"", *code, *out)
+	}
+	if atomic.LoadInt32(&conn.closed) != 1 {
+		t.Fatalf("closed=%d, want 1", conn.closed)
+	}
+}
+
+func TestOnlyPlainErasesTakeTheBoundedCLI(t *testing.T) {
+	cases := []struct {
+		args map[string]interface{}
+		want bool
+	}{
+		{map[string]interface{}{"erase": true, "--udid": "x"}, true},
+		{map[string]interface{}{"erase": true, "--address": nil, "--rsd-port": nil}, true},
+		{map[string]interface{}{"erase": true, "--address": "fd00::1", "--rsd-port": "1234"}, false},
+		{map[string]interface{}{"erase": false}, false},
+		{map[string]interface{}{"reboot": true}, false},
+	}
+	for _, c := range cases {
+		if got := usesBoundedEraseCLI(c.args); got != c.want {
+			t.Errorf("usesBoundedEraseCLI(%v)=%v, want %v", c.args, got, c.want)
+		}
+	}
+}
