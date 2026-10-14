@@ -119,9 +119,13 @@ func awaitErasePresend(udid string) (p erasePresend, late <-chan erasePresend, b
 	var stage atomic.Value
 	stage.Store(stageResolveDevice)
 	done := make(chan erasePresend, 1)
+	// Read the seams here, on the caller's goroutine, not inside the one below: that goroutine
+	// outlives this call when it times out, and must not read package state after we return
+	// (the tests restore the seams then; under -race that was a data race).
+	resolveDevice, openService := eraseResolveDevice, eraseOpenService
 	go func() {
 		t0 := time.Now()
-		device, err := eraseResolveDevice(udid)
+		device, err := resolveDevice(udid)
 		resolved := time.Since(t0)
 		if err != nil {
 			done <- erasePresend{stage: stageResolveDevice, err: err, resolveDuration: resolved}
@@ -129,7 +133,7 @@ func awaitErasePresend(udid string) (p erasePresend, late <-chan erasePresend, b
 		}
 		stage.Store(stageOpenService)
 		t1 := time.Now()
-		conn, err := eraseOpenService(device)
+		conn, err := openService(device)
 		done <- erasePresend{device: device, conn: conn, stage: stageOpenService, err: err,
 			resolveDuration: resolved, openDuration: time.Since(t1)}
 	}()
