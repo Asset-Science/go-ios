@@ -202,13 +202,8 @@ func newServeMux() *http.ServeMux {
 		writeOK(w)
 	}))
 
-	mux.HandleFunc("/erase", postDeviceHandler(func(w http.ResponseWriter, r *http.Request, d ios.DeviceEntry) {
-		if err := mcinstall.Erase(d); err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeOK(w)
-	}))
+	// DESK-3471: the connect phase before anything is sent is bounded; see erase_presend.go.
+	mux.HandleFunc("/erase", eraseHandler)
 
 	// prepare (supervised cloud-config + skip-setup). chooseLocationServices is
 	// implicit in the skip list; pass certfile (DER or p12) + orgname to supervise.
