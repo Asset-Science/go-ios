@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,18 +91,85 @@ func repoRoot() (string, error) {
 	return filepath.Dir(strings.TrimSpace(string(out))), nil
 }
 
+// RepoRoot returns the repository root (the directory containing go.mod), so
+// tests can locate checked-in fixtures under testdata/. Fails the test if it
+// cannot be resolved.
+func RepoRoot(t *testing.T) string {
+	t.Helper()
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	return root
+}
+
+// commandTimeout bounds any single ios invocation in the e2e suites. It is far
+// above any legitimate command (even an 8 MiB tunnel file round-trip under load)
+// but well below go test's global timeout, so one wedged command fails its own
+// test — with a captured stack — instead of hanging until the whole suite
+// panics and takes every other test's result down with it.
+const commandTimeout = 3 * time.Minute
+
 // RunIOS executes the ios binary with the given args and returns stdout.
 // On non-zero exit it fails the test with stderr + stdout for debugging.
+// If the command exceeds commandTimeout it is treated as wedged (see
+// runBounded): the child is SIGQUIT'd so Go prints every goroutine's stack,
+// pinpointing where it blocked, and the test fails with that stack.
 func RunIOS(t *testing.T, args ...string) []byte {
 	t.Helper()
-	var stderr bytes.Buffer
-	cmd := exec.Command(iosBin, args...)
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, stderr, err := runBounded(commandTimeout, nil, args...)
 	if err != nil {
-		t.Fatalf("ios %v: %v\nstderr: %s\nstdout: %s", args, err, stderr.String(), out)
+		t.Fatalf("ios %v: %v\nstderr: %s\nstdout: %s", args, err, stderr, out)
 	}
 	return out
+}
+
+// runBounded runs the ios binary with the given args under a timeout. On a clean
+// finish it returns (stdout, stderr, exitErr) — exitErr nil only on exit 0. On
+// timeout the child is assumed wedged: it is sent SIGQUIT first, which makes the
+// Go runtime dump all goroutine stacks to stderr (GOTRACEBACK=all guarantees the
+// full dump), then SIGKILL, and it returns a timeout error with that stack still
+// in the returned stderr. The child runs in its own process group so the signal
+// reaches any grandchildren too.
+func runBounded(timeout time.Duration, stdin io.Reader, args ...string) (stdout, stderr []byte, err error) {
+	var o, e bytes.Buffer
+	cmd := exec.Command(iosBin, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = &o
+	cmd.Stderr = &e
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = append(os.Environ(), "GOTRACEBACK=all")
+	if err = cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("start: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err = <-done:
+		return o.Bytes(), e.Bytes(), err
+	case <-time.After(timeout):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGQUIT) // dump goroutine stacks
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-done
+		}
+		return o.Bytes(), e.Bytes(), fmt.Errorf("timed out after %s (wedged)", timeout)
+	}
+}
+
+// TryRunForDeviceBounded runs `ios <args> --udid=<udid>` under a timeout WITHOUT
+// failing the test, returning stdout, stderr and the run error (nil on exit 0).
+// On timeout the child is SIGQUIT-dumped then killed (see runBounded), so the
+// returned stderr carries the wedged child's goroutine stacks. Use it where the
+// caller wants to retry a command that can transiently wedge under load rather
+// than fail the whole test on the first stall.
+func TryRunForDeviceBounded(t *testing.T, udid string, timeout time.Duration, args ...string) (stdout, stderr []byte, err error) {
+	t.Helper()
+	return runBounded(timeout, nil, append(args, "--udid="+udid)...)
 }
 
 // RunForDevice runs ios with --udid=<udid> appended.
@@ -124,6 +192,22 @@ func TryRun(t *testing.T, args ...string) (stdout, stderr []byte, err error) {
 	cmd.Stderr = &e
 	err = cmd.Run()
 	return o.Bytes(), e.Bytes(), err
+}
+
+// RunForDeviceWithStdin runs ios with --udid=<udid> appended and the given
+// reader wired to stdin. Use it for commands that consume stdin (e.g.
+// `pasteboard set` without a <text> argument).
+func RunForDeviceWithStdin(t *testing.T, udid string, stdin io.Reader, args ...string) []byte {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd := exec.Command(iosBin, append(args, "--udid="+udid)...)
+	cmd.Stdin = stdin
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("ios %v: %v\nstderr: %s\nstdout: %s", args, err, stderr.String(), out)
+	}
+	return out
 }
 
 // AuditAfterLaunch launches bundleID and runs the accessibility audit against
@@ -191,6 +275,52 @@ func StreamSmoke(t *testing.T, udid string, window time.Duration, args ...string
 		t.Fatalf("ios %v: no streamed output within %s", args, window)
 	}
 	return b
+}
+
+// StreamNDJSON runs a self-terminating streaming ios command (one that stops on
+// its own, e.g. via --duration) and returns each non-empty stdout line decoded
+// as a JSON object. Unlike StreamSmoke it does not kill the process — the
+// command must exit on its own within timeout, which is asserted (a command that
+// hangs past its --duration is a real bug, not something to paper over by
+// killing it). Fails the test if the command errors, does not terminate, or
+// emits a stdout line that is not a well-formed JSON object.
+func StreamNDJSON(t *testing.T, udid string, timeout time.Duration, args ...string) []map[string]any {
+	t.Helper()
+	var out, stderr bytes.Buffer
+	cmd := exec.Command(iosBin, append(args, "--udid="+udid)...)
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("ios %v: start: %v", args, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ios %v: %v\nstderr: %s\nstdout: %s", args, err, stderr.String(), snippet(out.Bytes()))
+		}
+	case <-time.After(timeout):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		t.Fatalf("ios %v: did not terminate within %s (command should self-stop via --duration)\nstdout so far: %s", args, timeout, snippet(out.Bytes()))
+	}
+
+	var samples []map[string]any
+	for _, line := range bytes.Split(out.Bytes(), []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatalf("ios %v: stdout line is not a JSON object: %v\nline: %s", args, err, snippet(line))
+		}
+		samples = append(samples, m)
+	}
+	return samples
 }
 
 // StreamInTempDir runs a streaming ios command in a fresh temp directory for

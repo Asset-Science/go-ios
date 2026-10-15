@@ -3,8 +3,8 @@ package mcinstall
 import (
 	"bytes"
 	"fmt"
-
 	"log/slog"
+	"time"
 
 	"github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/afc"
@@ -108,7 +108,25 @@ func GetAllSetupSkipOptions() []string {
 // If certBytes is nil then the device won't be supervised.
 // ios.CreateDERFormattedSupervisionCert() provides an example how to generate these certificates. Orgname can be any string, it will show up as the
 // supervision name on the device. Locale and lang can be set. If they are empty strings, then the default will be en_US and en.
-func Prepare(device ios.DeviceEntry, skip []string, certBytes []byte, orgname string, locale string, lang string) error {
+// Timezone is an IANA timezone name (e.g. "America/Chicago"). If it is an empty string, the host system timezone is used.
+// The timezone write is only honoured by iOS during the setup-assistant phase.
+func Prepare(device ios.DeviceEntry, skip []string, certBytes []byte, orgname string, locale string, lang string, timezone string) error {
+	if timezone == "" {
+		timezone = ios.SystemTimezone()
+	}
+	return prepare(device, skip, certBytes, orgname, locale, lang, timezone, true)
+}
+
+// PrepareKeepingDeviceTime is Prepare without the timezone and clock write: the device keeps
+// whatever time and timezone it already has. Asset-Science fork addition: before the upstream
+// sync, Prepare wrote neither, and the `ios server` /prepare route keeps that behaviour when its
+// caller names no timezone, so a device never silently inherits the station host's timezone and
+// clock.
+func PrepareKeepingDeviceTime(device ios.DeviceEntry, skip []string, certBytes []byte, orgname string, locale string, lang string) error {
+	return prepare(device, skip, certBytes, orgname, locale, lang, "", false)
+}
+
+func prepare(device ios.DeviceEntry, skip []string, certBytes []byte, orgname string, locale string, lang string, timezone string, writeTime bool) error {
 	if locale == "" {
 		locale = "en_US"
 	}
@@ -211,12 +229,11 @@ func Prepare(device ios.DeviceEntry, skip []string, certBytes []byte, orgname st
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
-	err = ios.SetSystemTime(device)
-	if err != nil {
-		return err
+	if writeTime {
+		err = ios.SetTime(device, timezone, time.Now().Unix())
+		if err != nil {
+			return err
+		}
 	}
 
 	return setupSkipSetup(device)

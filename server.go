@@ -17,6 +17,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -50,6 +51,21 @@ func runServer(address string, parentPid int) {
 		}()
 	}
 
+	srv := &http.Server{
+		Addr:              address,
+		Handler:           newServerHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
+	if err := srv.ListenAndServe(); err != nil {
+		log.WithError(err).Fatal("go-ios server failed")
+	}
+}
+
+// newServeMux wires every REST route. It is separated from runServer so the
+// routing (method checks, JSON shape, device-independent endpoints like
+// /health) is exercisable from tests without binding a socket.
+func newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// --- liveness ---
@@ -201,16 +217,7 @@ func runServer(address string, parentPid int) {
 		q := r.URL.Query()
 		// chooseLocation=true shows the Location pane (skip everything else);
 		// otherwise skip every setup pane. Mirrors the PDD cfgutil behavior.
-		skip := mcinstall.GetAllSetupSkipOptions()
-		if q.Get("chooseLocation") == "true" {
-			filtered := skip[:0:0]
-			for _, k := range skip {
-				if k != "Location" {
-					filtered = append(filtered, k)
-				}
-			}
-			skip = filtered
-		}
+		skip := prepareSkipOptions(q.Get("chooseLocation") == "true")
 		var certBytes []byte
 		certfile := q.Get("certfile")
 		orgname := q.Get("orgname")
@@ -226,22 +233,33 @@ func runServer(address string, parentPid int) {
 				return
 			}
 		}
-		if err := mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang")); err != nil {
+		// timezone was added to mcinstall.Prepare upstream (matching `ios prepare
+		// --timezone=<tz>`), where an empty value means "write the HOST's timezone
+		// and clock to the device". Before the sync /prepare wrote neither, and PDD
+		// sends no timezone, so an absent or empty param keeps that: the device's
+		// time is left alone. Only an explicit IANA name (e.g. "America/Chicago")
+		// writes the timezone, and with it the host clock.
+		var err error
+		if tz, write := prepareTimezone(q); write {
+			err = mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"), tz)
+		} else {
+			err = mcinstall.PrepareKeepingDeviceTime(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"))
+		}
+		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeOK(w)
 	}))
 
-	srv := &http.Server{
-		Addr:              address,
-		Handler:           authMiddleware(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
-	if err := srv.ListenAndServe(); err != nil {
-		log.WithError(err).Fatal("go-ios server failed")
-	}
+	return mux
+}
+
+// newServerHandler is the handler runServer serves: every route, behind the auth
+// middleware. Tests drive this, not newServeMux, so a route that ends up outside
+// the auth path fails them.
+func newServerHandler() http.Handler {
+	return authMiddleware(newServeMux())
 }
 
 // authMiddleware hardens the loopback REST API against local abuse (DESK-3119
@@ -309,6 +327,33 @@ func postDeviceHandler(fn func(http.ResponseWriter, *http.Request, ios.DeviceEnt
 		}
 		fn(w, r, device)
 	}
+}
+
+// prepareTimezone reads /prepare's timezone param. write is false when the caller
+// named none (absent or empty): the device's time and timezone are then left as
+// they are, as they were before the upstream sync, instead of being set to the
+// host's. Kept as a pure function so the choice is unit-testable.
+func prepareTimezone(q url.Values) (timezone string, write bool) {
+	timezone = q.Get("timezone")
+	return timezone, timezone != ""
+}
+
+// prepareSkipOptions returns the setup panes to skip during `/prepare`. When
+// chooseLocation is true the Location pane is left in (shown to the user) and
+// everything else is skipped; otherwise every pane is skipped. Mirrors the PDD
+// cfgutil behavior. Kept as a pure function so the filtering is unit-testable.
+func prepareSkipOptions(chooseLocation bool) []string {
+	skip := mcinstall.GetAllSetupSkipOptions()
+	if !chooseLocation {
+		return skip
+	}
+	filtered := skip[:0:0]
+	for _, k := range skip {
+		if k != "Location" {
+			filtered = append(filtered, k)
+		}
+	}
+	return filtered
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
