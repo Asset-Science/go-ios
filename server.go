@@ -52,7 +52,7 @@ func runServer(address string, parentPid int) {
 
 	srv := &http.Server{
 		Addr:              address,
-		Handler:           authMiddleware(newServeMux()),
+		Handler:           newServerHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.WithFields(log.Fields{"address": address}).Info("go-ios server listening")
@@ -249,6 +249,13 @@ func newServeMux() *http.ServeMux {
 	}))
 
 	return mux
+}
+
+// newServerHandler is the handler runServer serves: every route, behind the auth
+// middleware. Tests drive this, not newServeMux, so a route that ends up outside
+// the auth path fails them.
+func newServerHandler() http.Handler {
+	return authMiddleware(newServeMux())
 }
 
 // authMiddleware hardens the loopback REST API against local abuse (DESK-3119
