@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"testing"
 )
@@ -116,5 +117,28 @@ func TestTheRightTokenReachesTheRoute(t *testing.T) {
 	newServerHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /erase with the right token = %d, want 405 from the route", rec.Code)
+	}
+}
+
+func TestPrepareTimezoneLeavesTheDeviceAloneWhenNoneIsNamed(t *testing.T) {
+	cases := []struct {
+		query     string
+		wantTZ    string
+		wantWrite bool
+	}{
+		{"", "", false},
+		{"timezone=", "", false},
+		{"locale=en_US&lang=en", "", false},
+		{"timezone=America%2FChicago", "America/Chicago", true},
+	}
+	for _, c := range cases {
+		q, err := url.ParseQuery(c.query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tz, write := prepareTimezone(q)
+		if tz != c.wantTZ || write != c.wantWrite {
+			t.Errorf("prepareTimezone(%q) = (%q, %v), want (%q, %v)", c.query, tz, write, c.wantTZ, c.wantWrite)
+		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -233,15 +234,18 @@ func newServeMux() *http.ServeMux {
 			}
 		}
 		// timezone was added to mcinstall.Prepare upstream (matching `ios prepare
-		// --timezone=<tz>`); forwarded from the query string like locale/lang.
-		//
-		// NOTE: an empty value is NOT a no-op — Prepare falls back to
-		// ios.SystemTimezone(), i.e. the HOST's timezone, and writes it to the
-		// device during setup-assistant. Before this upstream change /prepare wrote
-		// no timezone at all, so callers that omit the param now get the station's
-		// timezone pushed to the device. Pass an explicit IANA name (e.g.
-		// "America/Chicago") when the device's timezone matters.
-		if err := mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"), q.Get("timezone")); err != nil {
+		// --timezone=<tz>`), where an empty value means "write the HOST's timezone
+		// and clock to the device". Before the sync /prepare wrote neither, and PDD
+		// sends no timezone, so an absent or empty param keeps that: the device's
+		// time is left alone. Only an explicit IANA name (e.g. "America/Chicago")
+		// writes the timezone, and with it the host clock.
+		var err error
+		if tz, write := prepareTimezone(q); write {
+			err = mcinstall.Prepare(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"), tz)
+		} else {
+			err = mcinstall.PrepareKeepingDeviceTime(d, skip, certBytes, orgname, q.Get("locale"), q.Get("lang"))
+		}
+		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -323,6 +327,15 @@ func postDeviceHandler(fn func(http.ResponseWriter, *http.Request, ios.DeviceEnt
 		}
 		fn(w, r, device)
 	}
+}
+
+// prepareTimezone reads /prepare's timezone param. write is false when the caller
+// named none (absent or empty): the device's time and timezone are then left as
+// they are, as they were before the upstream sync, instead of being set to the
+// host's. Kept as a pure function so the choice is unit-testable.
+func prepareTimezone(q url.Values) (timezone string, write bool) {
+	timezone = q.Get("timezone")
+	return timezone, timezone != ""
 }
 
 // prepareSkipOptions returns the setup panes to skip during `/prepare`. When
