@@ -152,3 +152,17 @@ func fill(n int, v byte) []byte {
 	}
 	return b
 }
+
+func TestHostNtbInSizeStaysWithinWhatTheHostReads(t *testing.T) {
+	for _, c := range []struct{ advertised, want uint32 }{
+		{32764, 32764}, // the measured iPhone 15 Pro Max
+		{0, minNtbInSize},
+		{100, minNtbInSize},
+		{maxNtbInSize, maxNtbInSize},
+		{1 << 20, maxNtbInSize},
+	} {
+		if got := HostNtbInSize(c.advertised); got != c.want {
+			t.Errorf("HostNtbInSize(%d) = %d, want %d", c.advertised, got, c.want)
+		}
+	}
+}

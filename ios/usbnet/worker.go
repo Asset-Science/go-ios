@@ -116,11 +116,8 @@ func (k *Link) Run(ctx context.Context) error {
 }
 
 func (k *Link) readLoop(ctx context.Context) error {
-	size := int(k.t.Params().NtbInMaxSize)
-	if size <= 0 || size > 1<<16 {
-		size = 1 << 15
-	}
-	buf := make([]byte, size)
+	// The transport told the device this size (HostNtbInSize), so one block always fits.
+	buf := make([]byte, HostNtbInSize(k.t.Params().NtbInMaxSize))
 	for ctx.Err() == nil {
 		n, err := k.t.ReadNtb(buf)
 		if err != nil {

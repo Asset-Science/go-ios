@@ -2,6 +2,7 @@ package usbnet
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"net/netip"
 )
 
@@ -24,6 +25,20 @@ func DefaultLease() Lease {
 		Netmask:    netip.AddrFrom4([4]byte{255, 255, 255, 0}),
 		LeaseSecs:  3600,
 	}
+}
+
+// prefixLen is the lease's netmask as a prefix length; anything but a contiguous IPv4 mask
+// between /8 and /30 falls back to /24, the only one ever handed out.
+func (l Lease) prefixLen() int {
+	if l.Netmask.Is4() {
+		m := l.Netmask.As4()
+		v := binary.BigEndian.Uint32(m[:])
+		ones := bits.OnesCount32(v)
+		if ones >= 8 && ones <= 30 && v == ^uint32(0)<<(32-ones) {
+			return ones
+		}
+	}
+	return 24
 }
 
 const (

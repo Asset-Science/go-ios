@@ -188,6 +188,8 @@ func TestRelayRefusesTheStationsOwnServices(t *testing.T) {
 	assert.Error(t, err, "the gateway's other ports are not relayed")
 	_, err = gonet.DialContextTCP(ctx, phone, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{127, 0, 0, 1}), Port: 17890}, ipv4.ProtocolNumber)
 	assert.Error(t, err, "loopback is never relayed")
+	_, err = gonet.DialContextTCP(ctx, phone, tcpip.FullAddress{NIC: 1, Addr: tcpip.AddrFrom4([4]byte{10, 0, 0, 5}), Port: 445}, ipv4.ProtocolNumber)
+	assert.Error(t, err, "the station's LAN is never relayed")
 	assert.Empty(t, h.dials())
 }
 
@@ -204,7 +206,11 @@ func TestRelayResetsWhenTheHostCannotConnect(t *testing.T) {
 }
 
 func TestRelayTargetPolicy(t *testing.T) {
-	r := &Relay{lease: DefaultLease(), dns: netip.MustParseAddrPort("10.0.1.127:53")}
+	r := &Relay{
+		lease:     DefaultLease(),
+		dns:       netip.MustParseAddrPort("10.0.1.127:53"),
+		hostAddrs: map[netip.Addr]struct{}{netip.MustParseAddr("203.0.113.9"): {}},
+	}
 	for _, c := range []struct {
 		dst     string
 		port    uint16
@@ -222,6 +228,19 @@ func TestRelayTargetPolicy(t *testing.T) {
 		{"255.255.255.255", 67, "udp", "", false},
 		{"8.8.8.8", 67, "udp", "", false},
 		{"0.0.0.0", 1, "tcp", "", false},
+		// Not the internet: the station's LAN, CGNAT, the link's own subnet, reserved space.
+		{"10.0.1.127", 53, "udp", "", false},
+		{"10.20.30.40", 445, "tcp", "", false},
+		{"172.16.5.5", 3389, "tcp", "", false},
+		{"192.168.1.10", 5985, "tcp", "", false},
+		{"192.168.77.255", 9, "udp", "", false},
+		{"100.64.0.1", 80, "tcp", "", false},
+		{"0.1.2.3", 80, "tcp", "", false},
+		{"240.0.0.1", 80, "tcp", "", false},
+		{"198.18.0.1", 80, "tcp", "", false},
+		// The station's own public address.
+		{"203.0.113.9", 445, "tcp", "", false},
+		{"203.0.113.10", 443, "tcp", "203.0.113.10:443", true},
 	} {
 		got, ok := r.target(netip.MustParseAddr(c.dst), c.port, c.network)
 		assert.Equal(t, c.ok, ok, c.dst)
@@ -230,4 +249,42 @@ func TestRelayTargetPolicy(t *testing.T) {
 	noDNS := &Relay{lease: DefaultLease()}
 	_, ok := noDNS.target(netip.MustParseAddr("192.168.77.1"), 53, "udp")
 	assert.False(t, ok, "no upstream resolver: DNS to the gateway is refused")
+}
+
+func TestRelayCapsFlowsPerPhone(t *testing.T) {
+	r := newTestRelay(t, &fakeHost{conns: make(chan net.Conn, 1)})
+	var opened []net.Conn
+	for i := 0; i < maxUDPFlows; i++ {
+		a, b := net.Pipe()
+		_ = b.Close()
+		require.True(t, r.beginFlow("udp", a), i)
+		opened = append(opened, a)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	assert.False(t, r.beginFlow("udp", a), "one flow past the limit is refused")
+	assert.True(t, r.beginFlow("tcp", a), "the TCP limit is separate")
+	r.endFlow("tcp", a)
+	r.endFlow("udp", opened[0])
+	c, d := net.Pipe()
+	defer d.Close()
+	assert.True(t, r.beginFlow("udp", c), "an ended flow frees its slot")
+	r.endFlow("udp", c)
+	for _, o := range opened[1:] {
+		r.endFlow("udp", o)
+	}
+}
+
+func TestLeasePrefixLen(t *testing.T) {
+	l := DefaultLease()
+	assert.Equal(t, 24, l.prefixLen())
+	l.Netmask = netip.MustParseAddr("255.255.255.252")
+	assert.Equal(t, 30, l.prefixLen())
+	for _, bad := range []string{"255.0.255.0", "0.0.0.0", "255.255.255.255", "255.255.255.254"} {
+		l.Netmask = netip.MustParseAddr(bad)
+		assert.Equal(t, 24, l.prefixLen(), bad)
+	}
+	l.Netmask = netip.Addr{}
+	assert.Equal(t, 24, l.prefixLen())
 }

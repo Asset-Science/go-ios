@@ -33,10 +33,11 @@ type Manager struct {
 }
 
 type share struct {
-	cancel context.CancelFunc
-	link   *Link
-	done   chan struct{}
-	err    error // set before done closes
+	cancel   context.CancelFunc
+	link     *Link
+	done     chan struct{}
+	err      error // set before done closes
+	stopping bool  // Stop was called; guarded by Manager.mu
 }
 
 // NewManager returns a manager that opens phones with the platform transport and relays DNS to
@@ -52,16 +53,29 @@ func newManager(open func(string) (DeviceTransport, error), dns func() netip.Add
 func key(udid string) string { return strings.ToUpper(strings.ReplaceAll(udid, "-", "")) }
 
 // Start opens the phone's NCM function and starts sharing. Starting a phone that is already
-// shared is a no-op; a phone whose previous link ended is started afresh.
+// shared is a no-op; a phone whose previous link ended is started afresh, and one being stopped is
+// started again once its old link has closed (never two links on one device). The lock is held
+// while the device is opened, so Status and Stop wait for that.
 func (m *Manager) Start(udid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.links[key(udid)]; ok {
+	for {
+		s, ok := m.links[key(udid)]
+		if !ok {
+			break
+		}
 		select {
 		case <-s.done:
 		default:
-			return nil
+			if !s.stopping {
+				return nil
+			}
+			m.mu.Unlock()
+			<-s.done
+			m.mu.Lock()
+			continue
 		}
+		break
 	}
 	t, err := m.open(udid)
 	if err != nil {
@@ -91,27 +105,23 @@ func (m *Manager) Start(udid string) error {
 func (m *Manager) Stop(udid string) bool {
 	m.mu.Lock()
 	s, ok := m.links[key(udid)]
-	delete(m.links, key(udid))
+	if ok {
+		s.stopping = true
+	}
 	m.mu.Unlock()
 	if !ok {
 		return false
 	}
 	s.cancel()
 	<-s.done
-	return true
-}
-
-// StopAll ends every link, for server shutdown.
-func (m *Manager) StopAll() {
+	// The entry stays until the device is closed, so a Start meanwhile waits instead of opening it
+	// twice; a newer share that replaced it is left alone.
 	m.mu.Lock()
-	udids := make([]string, 0, len(m.links))
-	for k := range m.links {
-		udids = append(udids, k)
+	if m.links[key(udid)] == s {
+		delete(m.links, key(udid))
 	}
 	m.mu.Unlock()
-	for _, u := range udids {
-		m.Stop(u)
-	}
+	return true
 }
 
 // Status reports the phone's link; ok is false if it was never started (or was stopped).

@@ -31,26 +31,54 @@ const (
 	nicID          = 1
 	dialTimeout    = 15 * time.Second
 	udpIdleTimeout = 60 * time.Second
+	dnsIdleTimeout = 5 * time.Second // one answer per query; random source ports make one flow each
 	outQueueLen    = 1024
-	maxPendingTCP  = 1024
+	maxPendingTCP  = 1024 // gVisor's limit on handshakes in progress, not on open connections
+	maxTCPFlows    = 256  // open relayed TCP connections per phone
+	maxUDPFlows    = 128  // open relayed UDP flows per phone
+	udpBufferSize  = 65535
 )
 
+// deniedPrefixes are destinations the phone is never relayed to: everything that is not the public
+// internet. A phone on a diagnostics station is usually a customer's trade-in, so it gets what Wi-Fi
+// on an isolated network would give it — the internet — and not the station's LAN, its CGNAT side,
+// or reserved space. The station's resolver is reached only through the gateway's DNS (target).
+var deniedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"), // includes the link's own 192.168.77.0/24
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"), // includes 255.255.255.255
+}
+
 // Relay is the userspace TCP/IP stack between one phone and the host: every TCP connection and
-// UDP flow the phone opens is terminated here and re-opened as an ordinary host socket, so the
-// phone reaches whatever the host reaches. DNS the phone sends to the gateway goes to dnsUpstream.
+// UDP flow the phone opens to the public internet is terminated here and re-opened as an ordinary
+// host socket. DNS the phone sends to the gateway goes to dnsUpstream. Nothing else on or around
+// the station is reachable (target).
 type Relay struct {
 	stack *stack.Stack
 	ep    *channel.Endpoint
 	lease Lease
 	dns   netip.AddrPort
 	dial  DialFunc
+	// hostAddrs are the station's own addresses, refused like the denied prefixes so a station
+	// with a public address does not expose its services either.
+	hostAddrs map[netip.Addr]struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-	wg    sync.WaitGroup
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+	tcpFlows int
+	udpFlows int
+	wg       sync.WaitGroup
 }
 
 // NewRelay builds the stack for one link. dnsUpstream may be invalid, in which case DNS sent to
@@ -65,18 +93,19 @@ func NewRelay(l Lease, dnsUpstream netip.AddrPort, dial DialFunc) (*Relay, error
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 		}),
-		ep:    channel.New(outQueueLen, mtu, ""),
-		lease: l,
-		dns:   dnsUpstream,
-		dial:  dial,
-		conns: map[net.Conn]struct{}{},
+		ep:        channel.New(outQueueLen, mtu, ""),
+		lease:     l,
+		dns:       dnsUpstream,
+		dial:      dial,
+		hostAddrs: localAddrs(),
+		conns:     map[net.Conn]struct{}{},
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if err := r.stack.CreateNIC(nicID, r.ep); err != nil {
 		return nil, errors.New("usbnet: CreateNIC: " + err.String())
 	}
 	host := tcpip.AddrFrom4(l.HostAddr.As4())
-	addr := tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddressWithPrefix{Address: host, PrefixLen: 24}}
+	addr := tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddressWithPrefix{Address: host, PrefixLen: l.prefixLen()}}
 	if err := r.stack.AddProtocolAddress(nicID, addr, stack.AddressProperties{}); err != nil {
 		return nil, errors.New("usbnet: AddProtocolAddress: " + err.String())
 	}
@@ -130,6 +159,72 @@ func (r *Relay) Close() {
 	r.stack.Close()
 }
 
+// localAddrs is the station's own IPv4 addresses (empty if they cannot be listed: the denied
+// prefixes still cover every private and loopback one).
+func localAddrs() map[netip.Addr]struct{} {
+	out := map[netip.Addr]struct{}{}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok && ip.Unmap().Is4() {
+				out[ip.Unmap()] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// beginFlow registers a new relayed flow and its first connection, within the per-phone limit.
+// The WaitGroup is added under the same lock Close takes, so Close never misses a flow.
+func (r *Relay) beginFlow(network string, c net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ctx.Err() != nil {
+		return false
+	}
+	switch {
+	case network == "tcp" && r.tcpFlows >= maxTCPFlows, network == "udp" && r.udpFlows >= maxUDPFlows:
+		golog.Debug("usbnet flow limit reached", "module", logModule, "network", network)
+		return false
+	case network == "tcp":
+		r.tcpFlows++
+	default:
+		r.udpFlows++
+	}
+	r.conns[c] = struct{}{}
+	r.wg.Add(1)
+	return true
+}
+
+// tcpFull reports the TCP limit before a host socket is opened; beginFlow still has the last word.
+func (r *Relay) tcpFull() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tcpFlows >= maxTCPFlows
+}
+
+// endFlow is beginFlow's pair, run by the flow's goroutine as it exits.
+func (r *Relay) endFlow(network string, conns ...net.Conn) {
+	r.mu.Lock()
+	for _, c := range conns {
+		delete(r.conns, c)
+	}
+	if network == "tcp" {
+		r.tcpFlows--
+	} else {
+		r.udpFlows--
+	}
+	r.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	r.wg.Done()
+}
+
+// track adds a flow's second connection so Close can interrupt it.
 func (r *Relay) track(c net.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -140,16 +235,9 @@ func (r *Relay) track(c net.Conn) bool {
 	return true
 }
 
-func (r *Relay) untrack(c net.Conn) {
-	r.mu.Lock()
-	delete(r.conns, c)
-	r.mu.Unlock()
-	_ = c.Close()
-}
-
-// target decides where a phone flow to dst goes on the host side: the station's DNS for DNS sent to
-// the gateway, dst itself for ordinary unicast, nowhere for loopback, link-local, multicast,
-// broadcast or any other port on the gateway (the station's own services are not exposed).
+// target decides where a phone flow to dst goes on the host side: the station's resolver for DNS
+// sent to the gateway, dst itself for public unicast, and nowhere for anything else — the
+// gateway's other ports, the denied prefixes, and the station's own addresses.
 func (r *Relay) target(dst netip.Addr, port uint16, network string) (string, bool) {
 	if dst == r.lease.HostAddr {
 		if port == 53 && r.dns.IsValid() {
@@ -157,8 +245,15 @@ func (r *Relay) target(dst netip.Addr, port uint16, network string) (string, boo
 		}
 		return "", false
 	}
-	if !dst.Is4() || dst.IsLoopback() || dst.IsLinkLocalUnicast() || dst.IsMulticast() || dst.IsUnspecified() ||
-		dst == netip.AddrFrom4([4]byte{255, 255, 255, 255}) || (network == "udp" && (port == dhcpServer || port == dhcpClient)) {
+	if !dst.Is4() || (network == "udp" && (port == dhcpServer || port == dhcpClient)) {
+		return "", false
+	}
+	for _, p := range deniedPrefixes {
+		if p.Contains(dst) {
+			return "", false
+		}
+	}
+	if _, own := r.hostAddrs[dst]; own {
 		return "", false
 	}
 	return net.JoinHostPort(dst.String(), strconv.Itoa(int(port))), true
@@ -172,7 +267,7 @@ func addrOf(a tcpip.Address) netip.Addr {
 func (r *Relay) handleTCP(req *tcp.ForwarderRequest) {
 	id := req.ID()
 	dst, ok := r.target(addrOf(id.LocalAddress), id.LocalPort, "tcp")
-	if !ok {
+	if !ok || r.tcpFull() {
 		req.Complete(true)
 		return
 	}
@@ -193,17 +288,19 @@ func (r *Relay) handleTCP(req *tcp.ForwarderRequest) {
 	}
 	req.Complete(false)
 	phone := gonet.NewTCPConn(&wq, ep)
-	if !r.track(phone) || !r.track(host) {
-		r.untrack(phone)
-		r.untrack(host)
+	if !r.beginFlow("tcp", phone) {
+		_ = phone.Close()
+		_ = host.Close()
 		return
 	}
-	r.wg.Add(1)
+	if !r.track(host) {
+		_ = host.Close()
+		r.endFlow("tcp", phone)
+		return
+	}
 	go func() {
-		defer r.wg.Done()
+		defer r.endFlow("tcp", phone, host)
 		pipeTCP(phone, host)
-		r.untrack(phone)
-		r.untrack(host)
 	}()
 }
 
@@ -237,38 +334,41 @@ func (r *Relay) handleUDP(req *udp.ForwarderRequest) {
 		return
 	}
 	phone := gonet.NewUDPConn(&wq, ep)
-	if !r.track(phone) {
+	if !r.beginFlow("udp", phone) {
 		_ = phone.Close()
 		return
 	}
-	r.wg.Add(1)
+	idle := udpIdleTimeout
+	if id.LocalPort == 53 {
+		idle = dnsIdleTimeout
+	}
 	go func() {
-		defer r.wg.Done()
-		defer r.untrack(phone)
 		ctx, cancel := context.WithTimeout(r.ctx, dialTimeout)
 		host, err := r.dial(ctx, "udp", dst)
 		cancel()
 		if err != nil {
 			golog.Debug("usbnet udp dial failed", "module", logModule, "target", dst, "error", err)
+			r.endFlow("udp", phone)
 			return
 		}
 		if !r.track(host) {
 			_ = host.Close()
+			r.endFlow("udp", phone)
 			return
 		}
-		defer r.untrack(host)
-		relayUDP(phone, host)
+		defer r.endFlow("udp", phone, host)
+		relayUDP(phone, host, idle)
 	}()
 }
 
-// relayUDP moves datagrams both ways until either side has been idle for udpIdleTimeout.
-func relayUDP(phone, host net.Conn) {
+// relayUDP moves datagrams both ways until either side has been idle for `idle`.
+func relayUDP(phone, host net.Conn, idle time.Duration) {
 	done := make(chan struct{}, 2)
 	copyDatagrams := func(dst, src net.Conn) {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 65535)
+		buf := make([]byte, udpBufferSize)
 		for {
-			_ = src.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+			_ = src.SetReadDeadline(time.Now().Add(idle))
 			n, err := src.Read(buf)
 			if err != nil {
 				return

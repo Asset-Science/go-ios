@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/danielpaulus/go-ios/ios/golog"
@@ -186,6 +188,9 @@ func (t *WinUSBTransport) bringUp() error {
 	if err != nil {
 		return err
 	}
+	// Ask for what the host will read in one transfer, and remember that value: readLoop sizes its
+	// buffer from Params(), so the two can never disagree.
+	params.NtbInMaxSize = HostNtbInSize(params.NtbInMaxSize)
 	t.params = params
 	var inSize [4]byte
 	binary.LittleEndian.PutUint32(inSize[:], params.NtbInMaxSize)
@@ -246,8 +251,8 @@ func (t *WinUSBTransport) classRequest(requestType, request uint8, value, index 
 }
 
 // transfer starts one overlapped pipe transfer and waits for it. The pipe's PIPE_TRANSFER_TIMEOUT
-// still bounds it: a timed-out transfer completes with ERROR_SEM_TIMEOUT. buf must be heap memory
-// (both callers pass slices the link allocated), since the driver uses it after the call returns.
+// still bounds it: a timed-out transfer completes with ERROR_SEM_TIMEOUT. The driver uses buf until
+// the transfer completes, after the call has returned, so buf is kept reachable until then.
 func (t *WinUSBTransport) transfer(iface uintptr, proc *windows.LazyProc, pipe uint8, buf []byte, ov *windows.Overlapped) (uint32, error) {
 	if err := windows.ResetEvent(ov.HEvent); err != nil {
 		return 0, err
@@ -257,7 +262,11 @@ func (t *WinUSBTransport) transfer(iface uintptr, proc *windows.LazyProc, pipe u
 		return 0, e
 	}
 	var n uint32
-	if r, _, e := procGetOverlappedResult.Call(iface, uintptr(unsafe.Pointer(ov)), uintptr(unsafe.Pointer(&n)), 1); r == 0 {
+	r, _, e = procGetOverlappedResult.Call(iface, uintptr(unsafe.Pointer(ov)), uintptr(unsafe.Pointer(&n)), 1)
+	// LazyProc.Call keeps &buf[0] alive only for the duration of the call; the driver owns it until
+	// GetOverlappedResult (bWait=TRUE) has returned.
+	runtime.KeepAlive(buf)
+	if r == 0 {
 		return 0, e
 	}
 	return n, nil
@@ -289,8 +298,9 @@ func (t *WinUSBTransport) WriteNtb(b []byte) error {
 	return nil
 }
 
-// drainNotifications keeps the interrupt pipe empty until Close; a failure other than a
-// timeout means the device went away, which the data path reports on its own.
+// drainNotifications keeps the interrupt pipe empty until Close. It never gives up on its own: the
+// phone NAKs host writes while a notification is pending, so a drain that stopped would silently
+// wedge the link. A device that went away is reported by the data path, which ends the link.
 func (t *WinUSBTransport) drainNotifications() {
 	defer t.wg.Done()
 	for {
@@ -304,8 +314,13 @@ func (t *WinUSBTransport) drainNotifications() {
 			if errors.Is(err, errorSemTimeout) {
 				continue
 			}
-			golog.Debug("usbnet notification read ended", "module", logModule, "error", err)
-			return
+			golog.Debug("usbnet notification read failed", "module", logModule, "error", err)
+			select {
+			case <-t.stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			continue
 		}
 		golog.Trace("usbnet notification", "module", logModule, "bytes", fmt.Sprintf("%x", t.notifyBuf[:n]))
 	}

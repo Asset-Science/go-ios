@@ -61,7 +61,7 @@ func TestManagerReportsAndRestartsAnEndedLink(t *testing.T) {
 	assert.Equal(t, int32(2), opened.Load())
 	st, _ = m.Status("A")
 	assert.True(t, st.Running)
-	m.StopAll()
+	assert.True(t, m.Stop("A"))
 	_, ok := m.Status("A")
 	assert.False(t, ok)
 }
