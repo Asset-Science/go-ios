@@ -25,6 +25,7 @@ import (
 	"github.com/danielpaulus/go-ios/ios/installationproxy"
 	"github.com/danielpaulus/go-ios/ios/mcinstall"
 	"github.com/danielpaulus/go-ios/ios/mobileactivation"
+	"github.com/danielpaulus/go-ios/ios/usbnet"
 	"github.com/danielpaulus/go-ios/ios/zipconduit"
 	log "github.com/sirupsen/logrus"
 )
@@ -248,7 +249,49 @@ func newServeMux() *http.ServeMux {
 		writeOK(w)
 	}))
 
+	// DESK-4038: share the station's network with a phone over its USB network (NCM) link —
+	// Windows only. The phone must already be in network mode with the WinUSB package bound to
+	// its NCM function; these routes run the link and the userspace NAT, nothing more.
+	mux.HandleFunc("/usbshare/start", usbShareHandler(http.MethodPost, func(w http.ResponseWriter, udid string) {
+		if err := usbShares.Start(udid); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeOK(w)
+	}))
+	mux.HandleFunc("/usbshare/stop", usbShareHandler(http.MethodPost, func(w http.ResponseWriter, udid string) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"stopped": usbShares.Stop(udid)})
+	}))
+	mux.HandleFunc("/usbshare/status", usbShareHandler(http.MethodGet, func(w http.ResponseWriter, udid string) {
+		status, ok := usbShares.Status(udid)
+		if !ok {
+			writeErr(w, http.StatusNotFound, errBadRequest("not shared"))
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
+	}))
+
 	return mux
+}
+
+// usbShares runs one USB network link per phone for the life of the server.
+var usbShares = usbnet.NewManager()
+
+// usbShareHandler requires the method and an explicit udid: unlike the device routes there is no
+// "the single attached device" default, because sharing acts on one specific phone's USB link.
+func usbShareHandler(method string, fn func(http.ResponseWriter, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			writeErr(w, http.StatusMethodNotAllowed, errBadRequest(method+" required"))
+			return
+		}
+		udid := r.URL.Query().Get("udid")
+		if udid == "" {
+			writeErr(w, http.StatusBadRequest, errBadRequest("udid required"))
+			return
+		}
+		fn(w, udid)
+	}
 }
 
 // authMiddleware hardens the loopback REST API against local abuse (DESK-3119
