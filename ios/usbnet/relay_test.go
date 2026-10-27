@@ -254,7 +254,7 @@ func TestRelayTargetPolicy(t *testing.T) {
 func TestRelayCapsFlowsPerPhone(t *testing.T) {
 	r := newTestRelay(t, &fakeHost{conns: make(chan net.Conn, 1)})
 	var opened []net.Conn
-	for i := 0; i < maxUDPFlows; i++ {
+	for i := 0; i < flowLimits[flowUDP]; i++ {
 		a, b := net.Pipe()
 		_ = b.Close()
 		require.True(t, r.beginFlow("udp", a), i)
@@ -266,6 +266,8 @@ func TestRelayCapsFlowsPerPhone(t *testing.T) {
 	assert.False(t, r.beginFlow("udp", a), "one flow past the limit is refused")
 	assert.True(t, r.beginFlow("tcp", a), "the TCP limit is separate")
 	r.endFlow("tcp", a)
+	assert.True(t, r.beginFlow("dns", a), "DNS has its own budget: a phone full of UDP still resolves names")
+	r.endFlow("dns", a)
 	r.endFlow("udp", opened[0])
 	c, d := net.Pipe()
 	defer d.Close()

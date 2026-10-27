@@ -33,11 +33,19 @@ const (
 	udpIdleTimeout = 60 * time.Second
 	dnsIdleTimeout = 5 * time.Second // one answer per query; random source ports make one flow each
 	outQueueLen    = 1024
-	maxPendingTCP  = 1024 // gVisor's limit on handshakes in progress, not on open connections
-	maxTCPFlows    = 256  // open relayed TCP connections per phone
-	maxUDPFlows    = 128  // open relayed UDP flows per phone
+	maxPendingTCP  = 256 // gVisor's limit on handshakes (and so host dials) in progress
 	udpBufferSize  = 65535
 )
+
+// Kinds of relayed flow, each with its own per-phone limit. DNS to the gateway has a budget of its
+// own so long-lived UDP (QUIC holds a flow for udpIdleTimeout) can never starve name resolution.
+const (
+	flowTCP = "tcp"
+	flowUDP = "udp"
+	flowDNS = "dns"
+)
+
+var flowLimits = map[string]int{flowTCP: 256, flowUDP: 128, flowDNS: 32}
 
 // deniedPrefixes are destinations the phone is never relayed to: everything that is not the public
 // internet. A phone on a diagnostics station is usually a customer's trade-in, so it gets what Wi-Fi
@@ -74,11 +82,10 @@ type Relay struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	conns    map[net.Conn]struct{}
-	tcpFlows int
-	udpFlows int
-	wg       sync.WaitGroup
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	flows map[string]int // open flows per kind (flowTCP, flowUDP, flowDNS)
+	wg    sync.WaitGroup
 }
 
 // NewRelay builds the stack for one link. dnsUpstream may be invalid, in which case DNS sent to
@@ -99,6 +106,7 @@ func NewRelay(l Lease, dnsUpstream netip.AddrPort, dial DialFunc) (*Relay, error
 		dial:      dial,
 		hostAddrs: localAddrs(),
 		conns:     map[net.Conn]struct{}{},
+		flows:     map[string]int{},
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if err := r.stack.CreateNIC(nicID, r.ep); err != nil {
@@ -179,21 +187,17 @@ func localAddrs() map[netip.Addr]struct{} {
 
 // beginFlow registers a new relayed flow and its first connection, within the per-phone limit.
 // The WaitGroup is added under the same lock Close takes, so Close never misses a flow.
-func (r *Relay) beginFlow(network string, c net.Conn) bool {
+func (r *Relay) beginFlow(kind string, c net.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ctx.Err() != nil {
 		return false
 	}
-	switch {
-	case network == "tcp" && r.tcpFlows >= maxTCPFlows, network == "udp" && r.udpFlows >= maxUDPFlows:
-		golog.Debug("usbnet flow limit reached", "module", logModule, "network", network)
+	if r.flows[kind] >= flowLimits[kind] {
+		golog.Debug("usbnet flow limit reached", "module", logModule, "kind", kind)
 		return false
-	case network == "tcp":
-		r.tcpFlows++
-	default:
-		r.udpFlows++
 	}
+	r.flows[kind]++
 	r.conns[c] = struct{}{}
 	r.wg.Add(1)
 	return true
@@ -203,20 +207,16 @@ func (r *Relay) beginFlow(network string, c net.Conn) bool {
 func (r *Relay) tcpFull() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.tcpFlows >= maxTCPFlows
+	return r.flows[flowTCP] >= flowLimits[flowTCP]
 }
 
 // endFlow is beginFlow's pair, run by the flow's goroutine as it exits.
-func (r *Relay) endFlow(network string, conns ...net.Conn) {
+func (r *Relay) endFlow(kind string, conns ...net.Conn) {
 	r.mu.Lock()
 	for _, c := range conns {
 		delete(r.conns, c)
 	}
-	if network == "tcp" {
-		r.tcpFlows--
-	} else {
-		r.udpFlows--
-	}
+	r.flows[kind]--
 	r.mu.Unlock()
 	for _, c := range conns {
 		_ = c.Close()
@@ -288,18 +288,18 @@ func (r *Relay) handleTCP(req *tcp.ForwarderRequest) {
 	}
 	req.Complete(false)
 	phone := gonet.NewTCPConn(&wq, ep)
-	if !r.beginFlow("tcp", phone) {
+	if !r.beginFlow(flowTCP, phone) {
 		_ = phone.Close()
 		_ = host.Close()
 		return
 	}
 	if !r.track(host) {
 		_ = host.Close()
-		r.endFlow("tcp", phone)
+		r.endFlow(flowTCP, phone)
 		return
 	}
 	go func() {
-		defer r.endFlow("tcp", phone, host)
+		defer r.endFlow(flowTCP, phone, host)
 		pipeTCP(phone, host)
 	}()
 }
@@ -334,13 +334,13 @@ func (r *Relay) handleUDP(req *udp.ForwarderRequest) {
 		return
 	}
 	phone := gonet.NewUDPConn(&wq, ep)
-	if !r.beginFlow("udp", phone) {
+	kind, idle := flowUDP, udpIdleTimeout
+	if addrOf(id.LocalAddress) == r.lease.HostAddr && id.LocalPort == 53 {
+		kind, idle = flowDNS, dnsIdleTimeout
+	}
+	if !r.beginFlow(kind, phone) {
 		_ = phone.Close()
 		return
-	}
-	idle := udpIdleTimeout
-	if id.LocalPort == 53 {
-		idle = dnsIdleTimeout
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(r.ctx, dialTimeout)
@@ -348,15 +348,15 @@ func (r *Relay) handleUDP(req *udp.ForwarderRequest) {
 		cancel()
 		if err != nil {
 			golog.Debug("usbnet udp dial failed", "module", logModule, "target", dst, "error", err)
-			r.endFlow("udp", phone)
+			r.endFlow(kind, phone)
 			return
 		}
 		if !r.track(host) {
 			_ = host.Close()
-			r.endFlow("udp", phone)
+			r.endFlow(kind, phone)
 			return
 		}
-		defer r.endFlow("udp", phone, host)
+		defer r.endFlow(kind, phone, host)
 		relayUDP(phone, host, idle)
 	}()
 }

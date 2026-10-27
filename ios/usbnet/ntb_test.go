@@ -157,7 +157,7 @@ func TestHostNtbInSizeStaysWithinWhatTheHostReads(t *testing.T) {
 	for _, c := range []struct{ advertised, want uint32 }{
 		{32764, 32764}, // the measured iPhone 15 Pro Max
 		{0, minNtbInSize},
-		{100, minNtbInSize},
+		{100, 100}, // below the spec's floor, but never more than the device's own maximum
 		{maxNtbInSize, maxNtbInSize},
 		{1 << 20, maxNtbInSize},
 	} {

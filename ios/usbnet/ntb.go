@@ -222,19 +222,21 @@ func BuildNtb16(sequence uint16, frames [][]byte, p NtbParameters) []byte {
 	return out
 }
 
-// Bounds on the NTB input size the host asks for: NCM 1.0 §6.2.7 sets 2048 as the floor, and one
-// 16-bit NTB cannot exceed 64 KiB, so a larger read buffer would never be filled by a valid block.
+// Bounds on the NTB input size the host asks for: one 16-bit NTB cannot exceed 64 KiB, so a larger
+// read buffer would never be filled by a valid block; NCM 1.0 §6.2.7's 2048 is used only when the
+// device reports no size at all.
 const (
 	minNtbInSize = 2048
 	maxNtbInSize = 1 << 16
 )
 
 // HostNtbInSize is the SET_NTB_INPUT_SIZE value for a device advertising `advertised`: the
-// device's own maximum, kept within what the host reads in one transfer. The same value sizes the
-// host's read buffer, so the device is never told it may send more than the host can hold.
+// device's own maximum (never more — the host may not ask beyond it), kept within what the host
+// reads in one transfer. The same value sizes the host's read buffer, so the device is never told
+// it may send more than the host can hold.
 func HostNtbInSize(advertised uint32) uint32 {
 	switch {
-	case advertised < minNtbInSize:
+	case advertised == 0:
 		return minNtbInSize
 	case advertised > maxNtbInSize:
 		return maxNtbInSize
