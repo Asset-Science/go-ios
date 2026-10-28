@@ -152,10 +152,12 @@ func openPath(path string) (*WinUSBTransport, error) {
 		t.Close()
 		return nil, err
 	}
-	t.notifyBuf = make([]byte, 64)
-	t.stop = make(chan struct{})
-	t.wg.Add(1)
-	go t.drainNotifications()
+	if t.notifyPipe != 0 {
+		t.notifyBuf = make([]byte, 64)
+		t.stop = make(chan struct{})
+		t.wg.Add(1)
+		go t.drainNotifications()
+	}
 	return t, nil
 }
 
@@ -171,11 +173,12 @@ func (t *WinUSBTransport) bringUp() error {
 			t.notifyPipe = pipe.PipeID
 		}
 	}
-	if t.notifyPipe == 0 {
-		return errors.New("usbnet: communication interface has no notification pipe")
-	}
-	if err := t.setTimeout(t.control, t.notifyPipe, readTimeoutMillis); err != nil {
-		return err
+	// Older phones (measured: iPhone X, iOS 16.7) offer only NCM functions without a notification
+	// endpoint. Nothing to drain then; the link runs on the bulk pipes alone.
+	if t.notifyPipe != 0 {
+		if err := t.setTimeout(t.control, t.notifyPipe, readTimeoutMillis); err != nil {
+			return err
+		}
 	}
 	if r, _, e := procGetAssociatedInterface.Call(t.control, 0, uintptr(unsafe.Pointer(&t.data))); r == 0 {
 		return fmt.Errorf("usbnet: no associated data interface (is usbccgp grouping on?): %w", e)
