@@ -46,18 +46,19 @@ var (
 )
 
 const (
-	pipeTransferTimeout     = 0x03 // WinUsb_SetPipePolicy PIPE_TRANSFER_TIMEOUT
-	usbdPipeTypeBulk        = 2
-	usbdPipeTypeInterrupt   = 3
-	readTimeoutMillis       = 100
-	writeTimeoutMillis      = 1000
-	cmGetListPresent        = 0
-	crSuccess               = 0
-	maxDeviceIDLength       = 200
-	errorSemTimeout         = windows.Errno(121) // ERROR_SEM_TIMEOUT: a pipe timeout, not a failure
-	devpropTypeString       = 0x12
-	usbInterfaceDescLength  = 9
-	winusbPipeInfoSizeBytes = 12
+	pipeTransferTimeout      = 0x03 // WinUsb_SetPipePolicy PIPE_TRANSFER_TIMEOUT
+	pipeShortPacketTerminate = 0x01 // WinUsb_SetPipePolicy SHORT_PACKET_TERMINATE
+	usbdPipeTypeBulk         = 2
+	usbdPipeTypeInterrupt    = 3
+	readTimeoutMillis        = 100
+	writeTimeoutMillis       = 1000
+	cmGetListPresent         = 0
+	crSuccess                = 0
+	maxDeviceIDLength        = 200
+	errorSemTimeout          = windows.Errno(121) // ERROR_SEM_TIMEOUT: a pipe timeout, not a failure
+	devpropTypeString        = 0x12
+	usbInterfaceDescLength   = 9
+	winusbPipeInfoSizeBytes  = 12
 )
 
 // DEVPKEY_Device_InstanceId
@@ -225,7 +226,17 @@ func (t *WinUSBTransport) bringUp() error {
 	if err := t.setTimeout(t.data, t.bulkIn, readTimeoutMillis); err != nil {
 		return err
 	}
-	return t.setTimeout(t.data, t.bulkOut, writeTimeoutMillis)
+	if err := t.setTimeout(t.data, t.bulkOut, writeTimeoutMillis); err != nil {
+		return err
+	}
+	// NCM 1.0 §3.8: a block ends with a short packet. One that is a whole number of max-size packets
+	// (512 bytes at high speed) needs a zero-length packet after it, or the phone reads the next
+	// block as the rest of this one and both are lost. WinUSB sends that ZLP when this is set.
+	terminate := uint8(1)
+	if r, _, e := procSetPipePolicy.Call(t.data, uintptr(t.bulkOut), pipeShortPacketTerminate, 1, uintptr(unsafe.Pointer(&terminate))); r == 0 {
+		return fmt.Errorf("usbnet: short packet terminate: %w", e)
+	}
+	return nil
 }
 
 func (t *WinUSBTransport) setTimeout(iface uintptr, pipe uint8, millis uint32) error {
