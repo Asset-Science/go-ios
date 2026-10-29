@@ -17,7 +17,7 @@ import (
 )
 
 // NcmInterfaceGUID is the DeviceInterfaceGUIDs value the WinUSB driver package for the phone's NCM
-// function registers (DESK-4038 desk4038_ncm_winusb.inf). The transport opens the phone by it.
+// function registers (DESK-4038, asci_ncm_winusb.inf). The transport opens the phone by it.
 var NcmInterfaceGUID = windows.GUID{Data1: 0x4fcf489f, Data2: 0x7f03, Data3: 0x4dc9,
 	Data4: [8]byte{0xa4, 0x30, 0xe3, 0x00, 0x02, 0x1c, 0x18, 0x51}}
 
@@ -107,7 +107,7 @@ type WinUSBTransport struct {
 
 // OpenTransport finds the NCM function of the phone with this UDID (go-ios form; the USB serial is
 // the UDID without its dash) and brings it up the way Linux's cdc_ncm does. The function must be
-// in network mode with the DESK-4038 WinUSB package bound to it.
+// in network mode with the asci_ncm_winusb.inf WinUSB package bound to it.
 func OpenTransport(udid string) (*WinUSBTransport, error) {
 	paths, err := interfacePaths(&NcmInterfaceGUID)
 	if err != nil {
