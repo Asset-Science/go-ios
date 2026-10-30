@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -30,15 +29,8 @@ func runLangCommand(ctx commandContext) {
 
 func runEraseCommand(ctx commandContext) {
 	force, _ := ctx.Args.Bool("--force")
-	if !force {
-		slog.Warn("are you sure you want to erase device? (y/n)", "udid", ctx.Device.Properties.SerialNumber)
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		exitIfError("An error occured while reading input", err)
-		if !strings.HasPrefix(input, "y") {
-			slog.Error("abort")
-			return
-		}
+	if !force && !confirmErase(ctx.Device.Properties.SerialNumber) {
+		return
 	}
 
 	exitIfError("failed erasing", mcinstall.Erase(ctx.Device))

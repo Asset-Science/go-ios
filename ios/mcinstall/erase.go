@@ -16,9 +16,17 @@ func Erase(device ios.DeviceEntry) error {
 		return err
 	}
 	defer conn.Close()
+	return EraseWithConnection(conn, device)
+}
+
+// EraseWithConnection sends the erase over an already-open MCInstall connection.
+// Nothing reaches the device before this is called, so a caller that bounds the
+// connect phase (DESK-3471: the `ios server` /erase route) can report a timeout
+// there as "nothing was sent" and let its caller retry safely. The caller owns conn.
+func EraseWithConnection(conn *Connection, device ios.DeviceEntry) error {
 	golog.Info("start erasing", "module", logModule, "udid", device.Properties.SerialNumber)
 	golog.Debug("send flush request", "module", logModule, "udid", device.Properties.SerialNumber)
-	_, err = check(conn.sendAndReceive(request("Flush")))
+	_, err := check(conn.sendAndReceive(request("Flush")))
 	if err != nil {
 		return err
 	}
