@@ -28,15 +28,21 @@ type FindOptions struct {
 }
 
 // FindResult is what FindOnScreen reports. Value is the matched text with spaces removed;
-// Label is the element's full spoken description.
+// Label is the element's full spoken description. When nothing matched, Seen holds the labels
+// of the last walk, so the caller can tell a page that was not open from a label the pattern
+// does not cover.
 type FindResult struct {
-	Found     bool   `json:"found"`
-	Value     string `json:"value,omitempty"`
-	Label     string `json:"label,omitempty"`
-	Elements  int    `json:"elements"`
-	Passes    int    `json:"passes"`
-	ElapsedMs int64  `json:"elapsedMs"`
+	Found     bool     `json:"found"`
+	Value     string   `json:"value,omitempty"`
+	Label     string   `json:"label,omitempty"`
+	Elements  int      `json:"elements"`
+	Passes    int      `json:"passes"`
+	ElapsedMs int64    `json:"elapsedMs"`
+	Seen      []string `json:"seen,omitempty"`
 }
+
+// maxSeenLabelLength caps each label in FindResult.Seen.
+const maxSeenLabelLength = 80
 
 func (o FindOptions) withDefaults() FindOptions {
 	if o.Wait <= 0 {
@@ -72,8 +78,9 @@ type elementSession interface {
 // description, with spaces removed, matches re. The walk ends at the first match, at
 // maxElements, when the first element comes round again (the inspector wrapped), or when an
 // element does not arrive within perElement. A walk that returned no element at all is an
-// error, so the caller reconnects; a walk that saw elements but no match is not.
-func findInPass(ctx context.Context, src elementSource, re *regexp.Regexp, maxElements int, perElement time.Duration) (value, label string, walked int, err error) {
+// error, so the caller reconnects; a walk that saw elements but no match is not. seen holds
+// the labels the walk read, in order.
+func findInPass(ctx context.Context, src elementSource, re *regexp.Regexp, maxElements int, perElement time.Duration) (value, label string, walked int, seen []string, err error) {
 	defer func() {
 		// awaitHostInspectorCurrentElementChanged panics on a payload it cannot unarchive.
 		// One bad element must end this walk, not the process.
@@ -88,22 +95,23 @@ func findInPass(ctx context.Context, src elementSource, re *regexp.Regexp, maxEl
 		cancel()
 		if getErr != nil {
 			if walked == 0 {
-				return "", "", 0, getErr
+				return "", "", 0, seen, getErr
 			}
-			return "", "", walked, nil
+			return "", "", walked, seen, nil
 		}
 		if walked > 0 && el.SpokenDescription == first {
-			return "", "", walked, nil
+			return "", "", walked, seen, nil
 		}
 		if walked == 0 {
 			first = el.SpokenDescription
 		}
 		walked++
+		seen = append(seen, truncateLabel(el.SpokenDescription))
 		if m := re.FindString(strings.ReplaceAll(el.SpokenDescription, " ", "")); m != "" {
-			return m, el.SpokenDescription, walked, nil
+			return m, el.SpokenDescription, walked, seen, nil
 		}
 	}
-	return "", "", walked, nil
+	return "", "", walked, seen, nil
 }
 
 // findWithConnector is FindOnScreen with the connection, clock and sleep injected for tests.
@@ -149,12 +157,16 @@ func findWithConnector(ctx context.Context, connect func(context.Context) (eleme
 			}
 		}
 		if session != nil {
-			value, label, walked, err := findInPass(ctx, session, re, opts.MaxElements, opts.PerElement)
+			value, label, walked, seen, err := findInPass(ctx, session, re, opts.MaxElements, opts.PerElement)
 			result.Passes++
 			result.Elements = walked
+			if walked > 0 {
+				result.Seen = seen
+			}
 			golog.Debug("ax find walk", "module", logModule, "pass", result.Passes, "elements", walked, "matched", value != "", "error", err)
 			if value != "" {
 				result.Found, result.Value, result.Label = true, value, label
+				result.Seen = nil
 				break
 			}
 			if err != nil {
@@ -246,3 +258,11 @@ type silentNotifier struct{}
 
 func (silentNotifier) HostAppStateChanged(Notification)               {}
 func (silentNotifier) HostInspectorNotificationReceived(Notification) {}
+
+func truncateLabel(label string) string {
+	r := []rune(label)
+	if len(r) > maxSeenLabelLength {
+		return string(r[:maxSeenLabelLength]) + "..."
+	}
+	return label
+}

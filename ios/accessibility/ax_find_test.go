@@ -51,7 +51,7 @@ func (f *fakeScreen) Close() error {
 
 func TestFindInPass_matchesWithSpacesRemoved(t *testing.T) {
 	screen := newFakeScreen("Name, iPhone", "EID, 8904 9032 0050 0888 2600 0499 6607 9268, Button", "Model")
-	value, label, walked, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	value, label, walked, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
 	assert.NoError(t, err)
 	assert.Equal(t, knownEid, value)
 	assert.Equal(t, "EID, 8904 9032 0050 0888 2600 0499 6607 9268, Button", label)
@@ -60,7 +60,7 @@ func TestFindInPass_matchesWithSpacesRemoved(t *testing.T) {
 
 func TestFindInPass_stopsWhenTheInspectorWraps(t *testing.T) {
 	screen := newFakeScreen("Settings", "General", "About")
-	value, _, walked, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	value, _, walked, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
 	assert.NoError(t, err)
 	assert.Empty(t, value)
 	assert.Equal(t, 3, walked, "the walk ends when the first element comes round again")
@@ -71,7 +71,7 @@ func TestFindInPass_stopsAtMaxElements(t *testing.T) {
 	for i := range labels {
 		labels[i] = "row " + string(rune('A'+i%26)) + string(rune('a'+i/26))
 	}
-	_, _, walked, err := findInPass(context.Background(), newFakeScreen(labels...), eidPattern, 80, time.Second)
+	_, _, walked, _, err := findInPass(context.Background(), newFakeScreen(labels...), eidPattern, 80, time.Second)
 	assert.NoError(t, err)
 	assert.Equal(t, 80, walked)
 }
@@ -79,7 +79,7 @@ func TestFindInPass_stopsAtMaxElements(t *testing.T) {
 func TestFindInPass_firstElementFailingIsAnError(t *testing.T) {
 	screen := newFakeScreen("About")
 	screen.errAt = 0
-	_, _, walked, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	_, _, walked, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
 	assert.Error(t, err)
 	assert.Equal(t, 0, walked)
 }
@@ -87,7 +87,7 @@ func TestFindInPass_firstElementFailingIsAnError(t *testing.T) {
 func TestFindInPass_laterElementFailingEndsTheWalkWithoutError(t *testing.T) {
 	screen := newFakeScreen("Settings", "General", "About")
 	screen.errAt = 2
-	value, _, walked, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	value, _, walked, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
 	assert.NoError(t, err)
 	assert.Empty(t, value)
 	assert.Equal(t, 2, walked)
@@ -96,7 +96,7 @@ func TestFindInPass_laterElementFailingEndsTheWalkWithoutError(t *testing.T) {
 func TestFindInPass_panicBecomesAnError(t *testing.T) {
 	screen := newFakeScreen("Settings")
 	screen.panicAt = 0
-	_, _, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	_, _, _, _, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
 	assert.ErrorContains(t, err, "panicked")
 }
 
@@ -228,4 +228,38 @@ func TestFindWithConnector_stopsWhenCancelled(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, result.Found)
 	assert.Equal(t, 0, connects)
+}
+
+func TestFindInPass_reportsTheLabelsItSaw(t *testing.T) {
+	screen := newFakeScreen("Settings", "General", "About")
+	_, _, _, seen, err := findInPass(context.Background(), screen, eidPattern, 80, time.Second)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"Settings", "General", "About"}, seen)
+}
+
+func TestFindWithConnector_notFoundReportsTheLastWalk_DESK2464(t *testing.T) {
+	// A Battery Health page whose caption the pattern does not cover must show up in the result,
+	// so the log tells "page not open" from "label not matched".
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	long := "Battery Health, This iPhone battery is performing at normal peak capacity and more text"
+	connect := func(context.Context) (elementSession, error) {
+		return newFakeScreen("Battery", long), nil
+	}
+	result, err := findWithConnector(context.Background(), connect, eidPattern,
+		FindOptions{Wait: 4 * time.Second, Interval: 2 * time.Second}, clock.now, clock.sleep)
+	assert.NoError(t, err)
+	assert.False(t, result.Found)
+	// The inspector keeps its place between walks, so a walk can start anywhere on the screen.
+	assert.ElementsMatch(t, []string{"Battery", string([]rune(long)[:maxSeenLabelLength]) + "..."}, result.Seen)
+}
+
+func TestFindWithConnector_foundLeavesSeenEmpty(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	connect := func(context.Context) (elementSession, error) {
+		return newFakeScreen("About", "EID, "+knownEid+", Button"), nil
+	}
+	result, err := findWithConnector(context.Background(), connect, eidPattern, FindOptions{Wait: time.Minute}, clock.now, clock.sleep)
+	assert.NoError(t, err)
+	assert.True(t, result.Found)
+	assert.Nil(t, result.Seen)
 }
