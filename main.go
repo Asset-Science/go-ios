@@ -74,6 +74,7 @@ Usage:
   ios assistivetouch (enable | disable | toggle | get) [--force] [options]
   ios ax [--font=<fontSize>] [options]
   ios ax audit [options]
+  ios ax find --pattern=<regex> [--seconds=<seconds>] [--max-elements=<n>] [options]
   ios batterycheck [options]
   ios batteryregistry [options]
   ios crash cp <srcpattern> <target> [options]
@@ -250,6 +251,12 @@ The commands work as following:
     ios ax [--font=<fontSize>] [options]          Access accessibility inspector features.
     ios ax audit [options]                        Run the accessibility audit on the focused app and print the issues as JSON.
                                                   Each issue includes its type, the element's label and on-screen rect.
+    ios ax find --pattern=<regex> [--seconds=<seconds>] [--max-elements=<n>] [options]
+                                                  Watch the screen's text through the accessibility inspector until an element's
+                                                  spoken description (spaces removed) matches <regex>, for up to --seconds seconds
+                                                  , 30 by default. Prints found, value and label as JSON and exits 0 whether or not it
+                                                  matched; exits 1 only when the inspector cannot be reached. Needs Developer Mode, not
+                                                  the developer disk image.
     ios batterycheck [options]                    Prints battery info.
     ios batteryregistry [options]                 Prints battery registry stats like Temperature, Voltage.
     ios crash cp <srcpattern> <target> [options]  Copy "file pattern" to the target dir. Ex.: 'ios crash cp "*" "./crashes"'
