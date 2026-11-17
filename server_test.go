@@ -192,6 +192,38 @@ func TestHealthEndpointThroughMux(t *testing.T) {
 	}
 }
 
+// DESK-4038: the USB network sharing routes validate the request before touching any device.
+func TestUsbShareRoutesValidateMethodAndUdid(t *testing.T) {
+	for _, c := range []struct {
+		method, target string
+		want           int
+	}{
+		{http.MethodGet, "/usbshare/start?udid=X", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/usbshare/stop?udid=X", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/usbshare/status?udid=X", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/usbshare/start", http.StatusBadRequest},
+		{http.MethodGet, "/usbshare/status", http.StatusBadRequest},
+		{http.MethodGet, "/usbshare/status?udid=never-shared", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		newServeMux().ServeHTTP(rec, httptest.NewRequest(c.method, c.target, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s = %d, want %d", c.method, c.target, rec.Code, c.want)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got["error"] == nil {
+			t.Errorf("%s %s: want a JSON error body, got %q", c.method, c.target, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	newServeMux().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/usbshare/stop?udid=never-shared", nil))
+	var got map[string]interface{}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got["stopped"] != false {
+		t.Errorf("stopping a phone that was never shared: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func contains(s []string, v string) bool {
 	for _, x := range s {
 		if x == v {
