@@ -1,7 +1,6 @@
 package amfi
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -186,43 +185,28 @@ func EnableDeveloperMode(device ios.DeviceEntry, enablePostRestart bool) error {
 
 	udid := device.Properties.SerialNumber
 	golog.Info("Waiting for device to restart after enabling developer mode", "module", logModule, "udid", udid)
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	// A single deadline for the whole wait loop. Creating time.After inside the
-	// select would reset the deadline on every tick so it would never fire.
-	deadline := time.After(60 * time.Second)
-
-	// Loop trying to reinit the device to find out if it restarted
-WaitLoop:
-	for {
-		select {
-		case <-ticker.C:
-			device, err = ios.GetDevice(udid)
-			if err != nil {
-				golog.Info("Device is not yet available", "module", logModule, "udid", udid)
-				continue WaitLoop
-			}
-			break WaitLoop
-		case <-deadline:
-			ticker.Stop()
-			if err != nil {
-				return errors.New("Device was not restarted in 60 seconds")
-			}
-		}
+	listed := func() (ios.DeviceEntry, bool) {
+		d, err := ios.GetDevice(udid)
+		return d, err == nil
+	}
+	device, err = waitForRestart(listed, restartWait{}, time.Now, time.Sleep)
+	if err != nil {
+		return err
 	}
 	golog.Info("Device was successfully restarted after enabling developer mode", "module", logModule, "udid", udid)
 
 	// Try to also enable dev mode after the device restarts - skips the system popup that asks you to finalize dev mode enablement
 	if enablePostRestart {
 		golog.Info("Will attempt to enable developer mode post restart", "module", logModule, "udid", udid)
-		conn, err = New(device)
-		if err != nil {
-			return fmt.Errorf("EnableDeveloperMode: failed connecting to amfi service post restart with err: %w", err)
+		postRestart := func() error {
+			conn, err := New(device)
+			if err != nil {
+				return fmt.Errorf("failed connecting to amfi service post restart with err: %w", err)
+			}
+			defer conn.Close()
+			return conn.EnableDevModePostRestart()
 		}
-		defer conn.Close()
-		err = conn.EnableDevModePostRestart()
-		if err != nil {
+		if err := retryUntil(postRestart, restartWait{}.withDefaults().PostRestart, 5*time.Second, time.Now, time.Sleep); err != nil {
 			return fmt.Errorf("EnableDeveloperMode: failed enabling developer mode post restart, you need to finish the set up manually through the popup on the device, err: %w", err)
 		}
 		golog.Info("Successfully enabled developer mode on device post restart", "module", logModule, "udid", udid)
